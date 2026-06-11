@@ -1,0 +1,13 @@
+{
+  "name": "copilot-cost",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Copilot CLI extension that displays message cost, conversation cost, cumulative session total, and rolling totals after messages and in the statusline.",
+  "type": "module",
+  "scripts": {
+    "check": "node --check extension.mjs && find ../../scripts -name '*.mjs' -print -exec node --check {} \\;",
+    "smoke:statusline": "tmp=\"$(mktemp -d)\" && printf '{\"transcript_path\":null,\"context_window\":{\"current_context_tokens\":1200,\"displayed_context_limit\":200000},\"ai_used\":{\"total_nano_aiu\":0}}' | HOME=\"$tmp\" node extension.mjs --statusline",
+    "test": "node --test",
+    "validate": "npm test && npm run check && npm run smoke:statusline"
+  }
+}
