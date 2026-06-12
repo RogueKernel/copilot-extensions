@@ -3,11 +3,13 @@
 // while command handlers update them through direct args or interactive UI.
 
 import { DISPLAY, STYLE } from "./config.mjs";
+import { rm } from "node:fs/promises";
 import { readSessionLedger } from "./domain/session-ledger.mjs";
+import { SESSION_EXPORT_FILENAME, exportSessionData } from "./domain/session-export.mjs";
 import { readJson, writeJson } from "./io.mjs";
 import { paint, parseFormat as parseFormatValue } from "./render/format.mjs";
 import { renderCostOverview } from "./render/overview.mjs";
-import { settingsPath } from "./storage.mjs";
+import { pluginDataDirectory, settingsPath } from "./storage.mjs";
 import { readState } from "./state.mjs";
 import { copilotHome as managedCopilotHome } from "../../../scripts/lib/paths.mjs";
 import { uninstallExtensionShim } from "../../../scripts/lib/shim.mjs";
@@ -159,6 +161,14 @@ async function promptSettings(session, settings) {
     if (setting === "Format") {
         return promptFormatSurface(session, settings);
     }
+    if (setting === "Export Session Data") {
+        await promptExportSessionData(session, settings);
+        return null;
+    }
+    if (setting === "Clear Plugin Data") {
+        await promptClearPluginData(session);
+        return null;
+    }
     if (setting === "Uninstall") {
         await promptUninstall(session);
         return null;
@@ -199,6 +209,51 @@ async function promptFormat(session, settings, key, label) {
         return null;
     }
     return { ...settings, [key]: parseFormat(format) ?? defaultFormat };
+}
+
+async function promptExportSessionData(session, settings) {
+    try {
+        const result = await exportSessionData();
+        await session.log(`Exported ${result.sessionCount} Copilot CLI session records to ${result.outputPath}`);
+        const selection = await selectChoice(session, [
+            "Session data export complete.",
+            "",
+            `Saved: ${result.outputPath}`,
+            "",
+            "Choose where to go next.",
+        ].join("\n"), DISPLAY.exportChoices);
+        if (selection === "Settings") {
+            await promptSettings(session, settings);
+        }
+    } catch (error) {
+        await session.log(`Export failed: ${error.message}. Expected output file: ${SESSION_EXPORT_FILENAME}`);
+    }
+}
+
+async function promptClearPluginData(session) {
+    const directory = pluginDataDirectory();
+    const confirmed = await selectChoice(session, [
+        "Clear copilot-cost plugin data?",
+        "",
+        `This removes all files under ${directory}.`,
+        "Settings, local ledger history, runtime totals, export state, and managed install state will be reset.",
+        "The plugin package, native extension shim, and Copilot settings are not removed.",
+    ].join("\n"), DISPLAY.clearDataChoices);
+
+    if (confirmed !== "Yes") {
+        await session.log("Clear plugin data canceled.");
+        return;
+    }
+
+    try {
+        await rm(directory, { recursive: true, force: true });
+        await session.log([
+            `Cleared copilot-cost plugin data at ${directory}.`,
+            "Restart Copilot CLI or run /clear for this change to take effect.",
+        ].join("\n"));
+    } catch (error) {
+        await session.log(`Clear plugin data failed: ${error.message}`);
+    }
 }
 
 async function promptUninstall(session) {
@@ -313,12 +368,14 @@ function settingsHelpText() {
 
 function settingsSummaryText() {
     return [
-        "Configure where copilot-cost appears, which unit it uses, how summaries are formatted, or remove the managed install.",
+        "Configure where copilot-cost appears, which unit it uses, how summaries are formatted, or reset plugin data.",
         "",
         "Settings",
         "- Display location: after-message output, footer output, both, or off.",
         "- Unit: GBP, USD, or AI Credits.",
         "- Format: customize after-message and footer summary templates.",
+        "- Export Session Data: write COPILOT_COST_DEBUG.jsonl in the current directory.",
+        "- Clear Plugin Data: remove all copilot-cost plugin-data files.",
         "- Uninstall: remove the managed native extension shim and restore prior Copilot statusline/footer settings.",
     ].join("\n");
 }

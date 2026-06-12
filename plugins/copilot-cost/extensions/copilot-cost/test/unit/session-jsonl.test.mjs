@@ -103,6 +103,39 @@ test("extracts shutdown AIU, model fallback, compaction, and tokens without cont
     assert.ok(!JSON.stringify(summary).includes("do not persist"));
 });
 
+test("sums usage-event AIU per model when no shutdown total exists", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "copilot-cost-jsonl-"));
+    const file = join(dir, "events.jsonl");
+    await writeFile(file, [
+        JSON.stringify({
+            type: "assistant.usage",
+            timestamp: "2026-06-10T10:00:00.000Z",
+            data: {
+                model: "gpt-test",
+                outputTokens: 10,
+                copilotUsage: { totalNanoAiu: 100 },
+            },
+        }),
+        JSON.stringify({
+            type: "assistant.usage",
+            timestamp: "2026-06-10T10:01:00.000Z",
+            data: {
+                model: "gpt-test",
+                outputTokens: 20,
+                copilotUsage: { totalNanoAiu: 200 },
+            },
+        }),
+    ].join("\n"));
+
+    const summary = await parseSessionEvents(file, { id: "abc" });
+
+    assert.equal(summary.usageNanoAiu, 300);
+    assert.deepEqual(summary.modelMetrics["gpt-test"], {
+        totalNanoAiu: 300,
+        tokenTotals: { outputTokens: 30 },
+    });
+});
+
 test("uses session directory name as the default id", async () => {
     const dir = await mkdtemp(join(tmpdir(), "copilot-cost-session-"));
     const file = join(dir, "events.jsonl");

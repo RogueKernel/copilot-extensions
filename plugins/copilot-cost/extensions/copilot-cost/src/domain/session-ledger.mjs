@@ -4,6 +4,11 @@ import { BILLING, HISTORY } from "../config.mjs";
 import { readJson, updateJson, writeJson } from "../io.mjs";
 import { optNum } from "../math.mjs";
 import { sessionLedgerPath } from "../storage.mjs";
+import {
+    builtInModelRates,
+    normalizeModelName,
+    tokenClassKeys,
+} from "./model-pricing.mjs";
 
 export const LEDGER_VERSION = 1;
 export const STATE_OPEN = "open";
@@ -30,6 +35,8 @@ const SOURCE_RANK = {
     [SOURCE_MODEL_METRICS]: 4,
     [SOURCE_SHUTDOWN]: 5,
 };
+const RATE_PROFILE_SOURCES = new Set([SOURCE_SHUTDOWN, SOURCE_MODEL_METRICS, SOURCE_USAGE_EVENTS]);
+const AUTHORITATIVE_RATE_PROFILE_SOURCES = new Set([SOURCE_SHUTDOWN, SOURCE_MODEL_METRICS]);
 const WINDOW_DURATIONS = {
     window24hUsd: DAY_MS,
     window7dUsd: 7 * DAY_MS,
@@ -103,13 +110,14 @@ export function mergeLiveStatusline(ledger, { id, totalNanoAiu, at = Date.now() 
     }, at);
 }
 
-export function closeFromShutdown(ledger, { id, totalNanoAiu, modelNanoAiu, at = Date.now() } = {}) {
+export function closeFromShutdown(ledger, { id, totalNanoAiu, modelNanoAiu, modelMetrics, at = Date.now() } = {}) {
     const total = optNum(totalNanoAiu) ?? optNum(modelNanoAiu);
     return mergeSession(ledger, {
         id,
         state: STATE_CLOSED,
         totalNanoAiu: total,
         source: optNum(totalNanoAiu) !== undefined ? SOURCE_SHUTDOWN : SOURCE_MODEL_METRICS,
+        modelMetrics,
         closedAt: at,
         lastSeenAt: at,
         lastUpdatedAt: at,
@@ -219,6 +227,10 @@ function mergeSessionRecord(prior, patch, now) {
     if (patch.modelMetrics) {
         next.modelMetrics = mergeModelMetrics(prior.modelMetrics, patch.modelMetrics);
     }
+    if (next.source !== SOURCE_ESTIMATED_TOKENS) {
+        next.estimateConfidence = undefined;
+        next.estimateModel = undefined;
+    }
     return dropUndefined(next);
 }
 
@@ -292,54 +304,86 @@ function estimateFromTokens(session, profiles) {
     let totalNanoAiu = 0;
     let model;
     for (const [name, metrics] of Object.entries(modelMetrics)) {
-        const rate = profiles.byModel[name] ?? profiles.global;
-        if (!rate) {
-            continue;
+        const estimate = estimateTokenTotals(name, metrics.tokenTotals, profiles);
+        if (estimate > 0) {
+            totalNanoAiu += estimate;
+            model ??= name;
         }
-        totalNanoAiu += tokenUnits(metrics.tokenTotals) * rate;
-        model ??= name;
-    }
-    if (!totalNanoAiu && session.tokenTotals && profiles.global) {
-        totalNanoAiu = tokenUnits(session.tokenTotals) * profiles.global;
     }
     return totalNanoAiu > 0 ? { totalNanoAiu: Math.round(totalNanoAiu), model: model ?? "global" } : undefined;
 }
 
 function rateProfiles(ledger) {
     const byModel = {};
-    const global = { nano: 0, units: 0 };
     for (const session of Object.values(normalizeLedger(ledger).sessions)) {
         if (isPreCreditSession(session)) {
             continue;
         }
-        if (![SOURCE_SHUTDOWN, SOURCE_MODEL_METRICS].includes(session.source)) {
+        if (!RATE_PROFILE_SOURCES.has(session.source)) {
             continue;
         }
+        const authoritative = AUTHORITATIVE_RATE_PROFILE_SOURCES.has(session.source);
         for (const [model, metrics] of Object.entries(normalizeModelMetrics(session.modelMetrics))) {
             const nano = optNum(metrics.totalNanoAiu);
-            const units = tokenUnits(metrics.tokenTotals);
-            if (nano > 0 && units > 0) {
-                const current = byModel[model] ?? { nano: 0, units: 0 };
-                current.nano += nano;
-                current.units += units;
-                byModel[model] = current;
-                global.nano += nano;
-                global.units += units;
+            const tokenClass = singleTokenClass(metrics.tokenTotals);
+            const tokens = optNum(metrics.tokenTotals?.[tokenClass]);
+            if (nano > 0 && tokens > 0) {
+                const key = normalizeModelName(model);
+                const current = byModel[key] ?? {};
+                let bucket = current[tokenClass] ?? { nano: 0, tokens: 0, authoritative: false };
+                if (authoritative && !bucket.authoritative) {
+                    bucket = { nano: 0, tokens: 0, authoritative: true };
+                }
+                if (!authoritative && bucket.authoritative) {
+                    continue;
+                }
+                bucket.nano += nano;
+                bucket.tokens += tokens;
+                current[tokenClass] = bucket;
+                byModel[key] = current;
             }
         }
     }
     return {
-        byModel: Object.fromEntries(Object.entries(byModel).map(([model, value]) => [model, value.nano / value.units])),
-        global: global.units > 0 ? global.nano / global.units : undefined,
+        byModel: Object.fromEntries(Object.entries(byModel).map(([model, rates]) => [
+            model,
+            Object.fromEntries(Object.entries(rates)
+                .filter(([, value]) => value.tokens > 0)
+                .map(([key, value]) => [key, value.nano / value.tokens])),
+        ])),
     };
 }
 
-function tokenUnits(tokens = {}) {
-    return num(tokens.inputTokens)
-        + num(tokens.cacheReadTokens)
-        + num(tokens.cacheWriteTokens)
-        + num(tokens.outputTokens)
-        + num(tokens.reasoningTokens);
+function estimateTokenTotals(model, tokens = {}, profiles) {
+    const observed = profiles.byModel[normalizeModelName(model)] ?? {};
+    const builtIn = builtInModelRates(model, tokens) ?? {};
+    const billable = billableTokenTotals(tokens);
+    return tokenClassKeys(billable).reduce((total, key) => {
+        const rate = observed[key] ?? builtIn[key];
+        const count = optNum(billable?.[key]);
+        return rate !== undefined && count > 0 ? total + count * rate : total;
+    }, 0);
+}
+
+function billableTokenTotals(tokens = {}) {
+    const inputTokens = optNum(tokens.inputTokens);
+    const cacheReadTokens = optNum(tokens.cacheReadTokens);
+    const cacheWriteTokens = optNum(tokens.cacheWriteTokens);
+    const billable = {
+        cacheReadTokens,
+        cacheWriteTokens,
+        outputTokens: optNum(tokens.outputTokens),
+        reasoningTokens: optNum(tokens.reasoningTokens),
+    };
+    if (inputTokens !== undefined) {
+        billable.inputTokens = Math.max(0, inputTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0));
+    }
+    return billable;
+}
+
+function singleTokenClass(tokens = {}) {
+    const keys = tokenClassKeys(tokens);
+    return keys.length === 1 ? keys[0] : undefined;
 }
 
 function bucketTimestamp(session) {
@@ -350,6 +394,10 @@ function bucketTimestamp(session) {
 }
 
 function currentPricingNanoAiu(session, profiles) {
+    if (session.source === SOURCE_ESTIMATED_TOKENS) {
+        const estimate = estimateFromTokens(session, profiles);
+        return estimate?.totalNanoAiu ?? optNum(session.totalNanoAiu);
+    }
     if (!isPreCreditSession(session)) {
         return optNum(session.totalNanoAiu);
     }
@@ -358,7 +406,7 @@ function currentPricingNanoAiu(session, profiles) {
     if (estimate) {
         return estimate.totalNanoAiu;
     }
-    return session.source === SOURCE_ESTIMATED_TOKENS ? optNum(session.totalNanoAiu) : undefined;
+    return undefined;
 }
 
 function storedCurrentPricingNanoAiu(session) {
@@ -413,7 +461,15 @@ function normalizeTokenTotals(value) {
 }
 
 function mergeModelMetrics(prior, patch) {
-    return normalizeModelMetrics({ ...normalizeModelMetrics(prior), ...normalizeModelMetrics(patch) });
+    const next = { ...normalizeModelMetrics(prior) };
+    for (const [model, metrics] of Object.entries(normalizeModelMetrics(patch))) {
+        const existing = next[model] ?? {};
+        next[model] = dropUndefined({
+            totalNanoAiu: metrics.totalNanoAiu ?? existing.totalNanoAiu,
+            tokenTotals: metrics.tokenTotals ?? existing.tokenTotals,
+        });
+    }
+    return normalizeModelMetrics(next);
 }
 
 function normalizeModelMetrics(value) {
@@ -421,10 +477,10 @@ function normalizeModelMetrics(value) {
         return {};
     }
     const entries = Object.entries(value)
-        .map(([model, metrics]) => [model, {
+        .map(([model, metrics]) => [model, dropUndefined({
             totalNanoAiu: optNum(metrics?.totalNanoAiu),
             tokenTotals: normalizeTokenTotals(metrics?.tokenTotals),
-        }])
+        })])
         .filter(([model]) => cleanId(model));
     return Object.fromEntries(entries);
 }

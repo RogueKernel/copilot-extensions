@@ -46,6 +46,7 @@ After editing extension or setup-script code, run `npm run validate` from `plugi
 - Write JSON state and settings with `writeJson()` so parent directories are created and files are formatted with a trailing newline.
 - Use `updateSessionLedger()` for ledger read-modify-write paths so concurrent statusline/extension processes serialize updates and persist with atomic rename.
 - Keep `session-ledger.json` lean and content-free. The JSONL parser may retain only cost/token metadata, timestamps, session ids, and file metadata; runtime state may retain only values needed for reconciliation, context/rate display, estimates, and last-message formatting. It must not persist prompts, responses, transcript text, paths, tool arguments, or source code.
+- Keep `COPILOT_COST_DEBUG.jsonl` out of commits. It is an on-demand diagnostic export and should stay redacted: event metadata, cost/token/model summaries, ledger rows, and normalized session-state path labels only.
 - Rolling 24h/7d/30d totals must come from the session ledger. Do not reintroduce a `history.json` fallback.
 - Use `num()` for finite-number-or-zero semantics and `optNum()` when absence must be preserved.
 - Use `dropUndefined()` on state patches so missing live data does not erase previously known values.

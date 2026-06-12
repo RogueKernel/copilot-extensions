@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { HISTORY } from "../../src/config.mjs";
+import { BILLING, HISTORY } from "../../src/config.mjs";
 import { overviewStats, renderCostOverview } from "../../src/render/overview.mjs";
 
 const day = 24 * 60 * 60 * 1000;
@@ -164,6 +164,27 @@ test("overview renders a compact 180-day cost view", () => {
     }
 });
 
+test("overview calendar shows implied thousands for high daily costs instead of capping at 999", () => {
+    const now = Date.UTC(2026, 5, 10, 12);
+    const output = renderCostOverview({
+        now,
+        color: false,
+        settings: { unit: "gbp" },
+        ledger: {
+            sessions: {
+                lowThousands: session("lowThousands", Date.UTC(2026, 5, 3, 12), nanoAiuForGbp(1200)),
+                highThousands: session("highThousands", Date.UTC(2026, 5, 4, 12), nanoAiuForGbp(9900)),
+                tenThousand: session("tenThousand", Date.UTC(2026, 5, 5, 12), nanoAiuForGbp(10_000)),
+            },
+        },
+    });
+
+    assert.match(output, /We \|£1\.2\|£-\s+\|/);
+    assert.match(output, /Th \|£9\.9\|\s+\|/);
+    assert.match(output, /Fr \|£10k\|\s+\|/);
+    assert.doesNotMatch(output, /£999/);
+});
+
 function session(id, at, totalNanoAiu, tokenTotals = {}, modelMetrics = {}) {
     return {
         id,
@@ -178,6 +199,10 @@ function session(id, at, totalNanoAiu, tokenTotals = {}, modelMetrics = {}) {
 
 function stripAnsi(value) {
     return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function nanoAiuForGbp(gbp) {
+    return Math.round(gbp / BILLING.gbpPerUsd / BILLING.usdPerAiCredit * BILLING.nanoAiuPerAiCredit);
 }
 
 function assertApprox(actual, expected) {

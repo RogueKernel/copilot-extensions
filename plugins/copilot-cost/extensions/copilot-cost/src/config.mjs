@@ -4,6 +4,7 @@
 
 export const BILLING = {
     usdPerAiCredit: 0.01,
+    // Copilot telemetry still calls this AIU in places; 1 AIU is 1 AI Credit.
     nanoAiuPerAiCredit: 1_000_000_000,
     gbpPerUsd: 0.74,
     cacheHitRatio: 0.95,
@@ -44,7 +45,9 @@ export const DISPLAY = {
     menuChoices: ["Info", "Settings"],
     infoChoices: ["Settings", "Back"],
     uninstallChoices: ["Yes", "No"],
-    settingChoices: ["Display location", "Unit", "Format", "Uninstall", "Cancel"],
+    clearDataChoices: ["Yes", "No"],
+    exportChoices: ["Settings", "Done"],
+    settingChoices: ["Display location", "Unit", "Format", "Export Session Data", "Clear Plugin Data", "Uninstall", "Cancel"],
     labels: {
         message: "after each message",
         footer: "footer",

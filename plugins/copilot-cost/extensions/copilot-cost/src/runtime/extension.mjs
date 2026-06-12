@@ -4,6 +4,7 @@
 
 import { officialTotal, snapshotCompaction, snapshotTurn } from "../domain/cost.mjs";
 import { closeFromShutdown, updateSessionLedger } from "../domain/session-ledger.mjs";
+import { modelMetricsFromShutdown } from "../domain/session-jsonl.mjs";
 import { currentSessionId, syncSessionLedger } from "../domain/session-sync.mjs";
 import { collect, createTurn } from "../domain/turns.mjs";
 import { refreshUsageWindows } from "../domain/windows.mjs";
@@ -194,6 +195,7 @@ export async function finalizeShutdown(session, event, overrides = {}) {
         id,
         totalNanoAiu: deps.optNum(data.totalNanoAiu),
         modelNanoAiu: modelNanoAiu(data.modelMetrics, deps.optNum),
+        modelMetrics: modelMetricsFromShutdown(data.modelMetrics),
         at,
     }));
     return ledger.sessions[id];

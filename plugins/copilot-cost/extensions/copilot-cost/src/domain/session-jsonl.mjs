@@ -75,7 +75,7 @@ function collectAssistantUsage(summary, data) {
     summary.tokenTotals = addTokenTotals(summary.tokenTotals, tokens);
     const model = modelName(data);
     if (model) {
-        mergeModelMetric(summary, model, { tokenTotals: tokens, totalNanoAiu: nano });
+        mergeModelMetric(summary, model, { tokenTotals: tokens, totalNanoAiu: nano }, { totalMode: "add" });
     }
 }
 
@@ -94,7 +94,7 @@ function collectShutdown(summary, data) {
         summary.totalNanoAiu = total;
     }
 
-    const modelMetrics = collectModelMetrics(data.modelMetrics);
+    const modelMetrics = modelMetricsFromShutdown(data.modelMetrics);
     for (const [model, metrics] of Object.entries(modelMetrics)) {
         mergeModelMetric(summary, model, metrics);
     }
@@ -114,7 +114,7 @@ function collectShutdown(summary, data) {
     }
 }
 
-function collectModelMetrics(modelMetrics = {}) {
+export function modelMetricsFromShutdown(modelMetrics = {}) {
     if (!modelMetrics || typeof modelMetrics !== "object") {
         return {};
     }
@@ -134,10 +134,13 @@ function collectModelMetrics(modelMetrics = {}) {
     }).filter(([model]) => typeof model === "string" && model.trim()));
 }
 
-function mergeModelMetric(summary, model, patch) {
+function mergeModelMetric(summary, model, patch, { totalMode = "replace" } = {}) {
     const prior = summary.modelMetrics[model] ?? {};
+    const patchTotal = optNum(patch.totalNanoAiu);
     summary.modelMetrics[model] = {
-        totalNanoAiu: maxDefined(prior.totalNanoAiu, patch.totalNanoAiu),
+        totalNanoAiu: totalMode === "add" && patchTotal !== undefined
+            ? num(prior.totalNanoAiu) + patchTotal
+            : patchTotal ?? prior.totalNanoAiu,
         tokenTotals: addTokenTotals(prior.tokenTotals, patch.tokenTotals),
     };
 }

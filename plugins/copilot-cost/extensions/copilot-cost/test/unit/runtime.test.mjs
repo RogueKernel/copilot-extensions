@@ -338,6 +338,44 @@ test("finalizeShutdown marks the session ledger closed when shutdown data arrive
     assert.equal(written.sessions.abc.totalNanoAiu, 2_000_000_000);
 });
 
+test("finalizeShutdown persists shutdown model metrics for dashboard breakdowns", async () => {
+    const record = await finalizeShutdown(new FakeSession("/tmp/session-state/abc"), {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        data: {
+            totalNanoAiu: 3_000_000_000,
+            modelMetrics: {
+                "gpt-test": {
+                    totalNanoAiu: 3_000_000_000,
+                    usage: {
+                        inputTokens: 100,
+                        cacheReadTokens: 20,
+                        outputTokens: 10,
+                    },
+                    requests: { count: 2, cost: 3 },
+                },
+            },
+        },
+    }, {
+        updateSessionLedger: async (updater) => updater({}),
+    });
+
+    assert.equal(record.state, "closed");
+    assert.equal(record.source, "shutdown");
+    assert.equal(record.totalNanoAiu, 3_000_000_000);
+    assert.deepEqual(record.modelMetrics, {
+        "gpt-test": {
+            totalNanoAiu: 3_000_000_000,
+            tokenTotals: {
+                inputTokens: 100,
+                cacheReadTokens: 20,
+                outputTokens: 10,
+                requestCount: 2,
+                requestCostUnits: 3,
+            },
+        },
+    });
+});
+
 class FakeSession {
     constructor(workspacePath = "/workspace") {
         this.workspacePath = workspacePath;

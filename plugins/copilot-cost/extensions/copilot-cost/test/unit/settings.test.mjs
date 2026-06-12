@@ -272,6 +272,7 @@ test("interactive settings submenu uses compact settings copy", async () => {
     const settingsPrompt = stripAnsi(result.requests[1].message);
     assert.match(settingsPrompt, /Configure where copilot-cost appears/);
     assert.match(settingsPrompt, /Display location: after-message output/);
+    assert.match(settingsPrompt, /Clear Plugin Data: remove all copilot-cost plugin-data files/);
     assert.doesNotMatch(settingsPrompt, /After-message example:/);
 });
 
@@ -376,6 +377,147 @@ test("interactive uninstall cancellation leaves managed files untouched", async 
     assert.equal(result.shimIsFile, true);
     assert.match(result.copilotSettings.statusLine.command, /copilot-cost/);
     assert.deepEqual(result.copilotSettings.disabledSkills, ["other-skill", "ext-cost-setup"]);
+});
+
+test("interactive clear plugin data removes the plugin-data directory after confirmation", async () => {
+    const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
+
+    const result = JSON.parse(await runSettingsScript(home, `
+        import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+        import { join } from "node:path";
+        import { configure } from "./src/settings.mjs";
+
+        await mkdir(join(process.env.COPILOT_PLUGIN_DATA, "nested"), { recursive: true });
+        await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "settings.json"), JSON.stringify({ mode: "footer" }));
+        await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "session-ledger.json"), JSON.stringify({ version: 1, sessions: {} }));
+        await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "install-state.json"), JSON.stringify({ hadStatusLine: true }));
+        await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "nested", "other.json"), "{}");
+
+        const copilotSettingsPath = join(process.env.COPILOT_HOME, "settings.json");
+        await mkdir(join(process.env.COPILOT_HOME), { recursive: true });
+        await writeFile(copilotSettingsPath, JSON.stringify({ footer: { showCustom: true } }));
+
+        const logs = [];
+        const choices = ["Settings", "Clear Plugin Data", "Yes"];
+        await configure({
+            capabilities: { ui: { elicitation: true } },
+            ui: {
+                elicitation: async () => ({
+                    action: "accept",
+                    content: { selection: choices.shift() },
+                }),
+            },
+            log: async (value) => logs.push(value),
+        }, { args: "" });
+
+        let pluginDataExists = true;
+        try {
+            await stat(process.env.COPILOT_PLUGIN_DATA);
+        } catch (error) {
+            if (error.code === "ENOENT") {
+                pluginDataExists = false;
+            } else {
+                throw error;
+            }
+        }
+        const copilotSettings = JSON.parse(await readFile(copilotSettingsPath, "utf8"));
+        console.log(JSON.stringify({ logs, pluginDataExists, copilotSettings }));
+    `));
+
+    assert.equal(result.pluginDataExists, false);
+    assert.deepEqual(result.copilotSettings, { footer: { showCustom: true } });
+    assert.match(result.logs[0], /Cleared copilot-cost plugin data at /);
+    assert.match(result.logs[0], /Restart Copilot CLI or run \/clear/);
+});
+
+test("interactive clear plugin data cancellation leaves plugin-data untouched", async () => {
+    const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
+
+    const result = JSON.parse(await runSettingsScript(home, `
+        import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+        import { join } from "node:path";
+        import { configure } from "./src/settings.mjs";
+
+        await mkdir(process.env.COPILOT_PLUGIN_DATA, { recursive: true });
+        await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "settings.json"), JSON.stringify({ mode: "footer" }));
+
+        const logs = [];
+        const choices = ["Settings", "Clear Plugin Data", "No"];
+        await configure({
+            capabilities: { ui: { elicitation: true } },
+            ui: {
+                elicitation: async () => ({
+                    action: "accept",
+                    content: { selection: choices.shift() },
+                }),
+            },
+            log: async (value) => logs.push(value),
+        }, { args: "" });
+
+        const pluginData = await stat(process.env.COPILOT_PLUGIN_DATA);
+        const settings = JSON.parse(await readFile(join(process.env.COPILOT_PLUGIN_DATA, "settings.json"), "utf8"));
+        console.log(JSON.stringify({ logs, pluginDataIsDirectory: pluginData.isDirectory(), settings }));
+    `));
+
+    assert.deepEqual(result.logs, ["Clear plugin data canceled."]);
+    assert.equal(result.pluginDataIsDirectory, true);
+    assert.deepEqual(result.settings, { mode: "footer" });
+});
+
+test("interactive settings can export session data and return to settings", async () => {
+    const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
+    const result = JSON.parse(await runSettingsScript(home, `
+        import { mkdir, readFile, writeFile } from "node:fs/promises";
+        import { join } from "node:path";
+        import { configure } from "./src/settings.mjs";
+
+        const sessionDir = join(process.env.COPILOT_HOME, "session-state", "session-a");
+        await mkdir(sessionDir, { recursive: true });
+        await writeFile(join(sessionDir, "events.jsonl"), JSON.stringify({
+            type: "session.shutdown",
+            timestamp: "2026-06-10T10:00:00.000Z",
+            data: { totalNanoAiu: 500 },
+        }) + "\\n");
+        await mkdir(process.env.COPILOT_PLUGIN_DATA, { recursive: true });
+        await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "session-ledger.json"), JSON.stringify({
+            version: 1,
+            sessions: {
+                "session-a": { id: "session-a", state: "closed", source: "shutdown", totalNanoAiu: 500 },
+            },
+        }));
+
+        const logs = [];
+        const requests = [];
+        const choices = ["Settings", "Export Session Data", "Settings", "Cancel"];
+        await configure({
+            capabilities: { ui: { elicitation: true } },
+            workspacePath: process.cwd(),
+            ui: {
+                elicitation: async (params) => {
+                    requests.push(params);
+                    return {
+                        action: "accept",
+                        content: { selection: choices.shift() },
+                    };
+                },
+            },
+            log: async (value) => logs.push(value),
+        }, { args: "" });
+
+        const rows = (await readFile(join(process.cwd(), "COPILOT_COST_DEBUG.jsonl"), "utf8")).trim().split("\\n").map(JSON.parse);
+        console.log(JSON.stringify({ logs, requests, rows }));
+    `));
+
+    assert.match(result.logs[0], /Exported 1 Copilot CLI session records/);
+    assert.match(result.logs[0], /COPILOT_COST_DEBUG\.jsonl/);
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.rows[0].sessionId, "session-a");
+    assert.equal(result.rows[0].extracted.summary.bestTotalNanoAiu, 500);
+    assert.deepEqual(
+        result.requests[2].requestedSchema.properties.selection.oneOf.map((choice) => choice.title),
+        ["Settings", "Done"],
+    );
+    assert.match(stripAnsi(result.requests[3].message), /Cost display settings/);
 });
 
 test("format input help is structured and readable", async () => {

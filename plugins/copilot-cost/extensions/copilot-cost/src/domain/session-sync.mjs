@@ -11,8 +11,6 @@ import {
     SOURCE_COMPACTION,
     SOURCE_NONE,
     SOURCE_USAGE_EVENTS,
-    STATE_AUTO_CLOSED,
-    STATE_CLOSED,
     STATE_OPEN,
     updateSessionLedger,
 } from "./session-ledger.mjs";
@@ -23,7 +21,6 @@ import { sessionLedgerPath, sessionStateRootPath } from "../storage.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETENTION_MS = HISTORY.retentionDays * DAY_MS;
-const FINAL_STATES = new Set([STATE_OPEN, STATE_CLOSED, STATE_AUTO_CLOSED]);
 
 export async function syncSessionLedger({
     currentSessionId,
@@ -35,10 +32,7 @@ export async function syncSessionLedger({
     const parsedSessions = [];
     for (const file of await discoverSessionEventFiles(sessionStateRoot)) {
         const prior = snapshot.sessions[file.id];
-        if (prior?.state && FINAL_STATES.has(prior.state)) {
-            continue;
-        }
-        if (!prior && file.mtimeMs < now - RETENTION_MS) {
+        if (!shouldParseSessionFile(prior, file, { currentSessionId, now })) {
             continue;
         }
         parsedSessions.push(await parseSessionEvents(file.path, { id: file.id }));
@@ -64,15 +58,27 @@ function syncSessionLedgerValue(existing, { currentSessionId, parsedSessions, no
     }
 
     for (const parsed of parsedSessions) {
-        const prior = ledger.sessions[parsed.id];
-        if (prior?.state && FINAL_STATES.has(prior.state)) {
-            continue;
-        }
         ledger = mergeParsedSession(ledger, parsed, now);
     }
 
     ledger = autoCloseStaleSessions(ledger, now);
     return ledger;
+}
+
+function shouldParseSessionFile(prior, file, { currentSessionId, now }) {
+    if (!prior) {
+        return file.id === currentSessionId || file.mtimeMs >= now - RETENTION_MS;
+    }
+    return eventFileChanged(prior, file);
+}
+
+function eventFileChanged(prior, file) {
+    const priorSize = optNum(prior.eventFileSize);
+    const priorMtime = optNum(prior.eventFileMtimeMs);
+    return priorSize === undefined
+        || priorMtime === undefined
+        || priorSize !== file.size
+        || Math.abs(priorMtime - file.mtimeMs) > 1;
 }
 
 export async function discoverSessionEventFiles(root = sessionStateRootPath()) {

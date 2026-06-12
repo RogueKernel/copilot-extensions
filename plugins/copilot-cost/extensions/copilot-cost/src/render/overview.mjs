@@ -366,7 +366,7 @@ function dayCost(bucket, unit, color) {
 
 function calendarAmount(usd, unit) {
     if (unit === "credits") {
-        return `${Math.min(999, Math.max(0, Math.round(usd / BILLING.usdPerAiCredit)))}c`;
+        return compactCreditCalendarAmount(usd / BILLING.usdPerAiCredit);
     }
     if (unit === "usd") {
         return compactCalendarAmount(usd, "$");
@@ -385,7 +385,60 @@ function noSpendCalendarAmount(unit) {
 }
 
 function compactCalendarAmount(value, prefix) {
-    return `${prefix}${Math.min(999, Math.max(0, Math.round(num(value))))}`;
+    const amount = Math.max(0, num(value));
+    const rounded = Math.round(amount);
+    if (rounded < 1000) {
+        return `${prefix}${rounded}`;
+    }
+    if (rounded < 10_000) {
+        return `${prefix}${oneDecimal(Math.min(9.9, Math.round(amount / 100) / 10))}`;
+    }
+    if (rounded < 99_500) {
+        return `${prefix}${Math.round(amount / 1000)}k`;
+    }
+    if (rounded < 999_500) {
+        return `${prefix}${decimalWithoutLeadingZero(amount / 1_000_000)}m`;
+    }
+    if (rounded < 99_500_000) {
+        return `${prefix}${Math.round(amount / 1_000_000)}m`;
+    }
+    if (rounded < 999_500_000) {
+        return `${prefix}${decimalWithoutLeadingZero(amount / 1_000_000_000)}b`;
+    }
+    return `${prefix}${Math.round(amount / 1_000_000_000)}b`;
+}
+
+function compactCreditCalendarAmount(value) {
+    const amount = Math.max(0, num(value));
+    const rounded = Math.round(amount);
+    if (rounded < 1000) {
+        return `${rounded}c`;
+    }
+    if (rounded < 10_000) {
+        return `${oneDecimal(Math.min(9.9, Math.round(amount / 100) / 10))}k`;
+    }
+    if (rounded < 99_500) {
+        return `${Math.round(amount / 1000)}kc`;
+    }
+    if (rounded < 999_500) {
+        return `${decimalWithoutLeadingZero(amount / 1_000_000)}mc`;
+    }
+    if (rounded < 99_500_000) {
+        return `${Math.round(amount / 1_000_000)}mc`;
+    }
+    if (rounded < 999_500_000) {
+        return `${decimalWithoutLeadingZero(amount / 1_000_000_000)}bc`;
+    }
+    return `${Math.round(amount / 1_000_000_000)}bc`;
+}
+
+function oneDecimal(value) {
+    const fixed = value.toFixed(1);
+    return fixed.endsWith(".0") ? fixed.slice(0, -2) : fixed;
+}
+
+function decimalWithoutLeadingZero(value) {
+    return oneDecimal(Math.max(0.1, Math.min(9.9, Math.round(value * 10) / 10))).replace(/^0/, "");
 }
 
 function padCell(value) {
