@@ -12,7 +12,7 @@ import { optNum } from "../math.mjs";
 import { renderSummary } from "../render/summary.mjs";
 import { timestampMs } from "../render/format.mjs";
 import { configure, readSettings, displays } from "../settings.mjs";
-import { runFirstRunTasks } from "../first-run.mjs";
+import { runFirstRunTasks, runStartupTasks } from "../first-run.mjs";
 import { mergeState, readState } from "../state.mjs";
 
 const DEFAULT_RUNTIME_DEPS = {
@@ -41,9 +41,10 @@ const DEFAULT_RUNTIME_DEPS = {
 // Joins the Copilot CLI session and wires usage events to cost-state patches.
 export async function runExtension({
     importSdk = () => import("@github/copilot-sdk/extension"),
+    startupTasks = runStartupTasks,
 } = {}) {
     const { joinSession } = await importSdk();
-    const runtime = createSessionRuntime();
+    const runtime = createSessionRuntime({ runStartupTasks: startupTasks });
     const session = await joinSession(runtime.joinOptions());
     runtime.attach(session);
 }
@@ -65,6 +66,9 @@ export function createSessionRuntime(overrides = {}) {
         joinOptions: () => ({ tools: [], commands }),
         attach(nextSession) {
             session = nextSession;
+            if (deps.runStartupTasks) {
+                void deps.runStartupTasks();
+            }
             wireSessionEvents(session, {
                 deps,
                 getTurn: () => turn,
@@ -76,10 +80,7 @@ export function createSessionRuntime(overrides = {}) {
                     contextWindow = nextContextWindow;
                 },
             });
-            const id = deps.currentSessionId(session);
-            if (id) {
-                void deps.syncSessionLedger({ currentSessionId: id });
-            }
+            void syncCurrentSessionLedger(session, deps);
             return session;
         },
     };
@@ -164,7 +165,16 @@ export async function finalizeTurn(session, turn, contextWindow, completionEvent
         await session.log(renderMessageSummary(state, windows, settings, deps));
     }
     await deps.runFirstRunTasks({ workspacePath: session.workspacePath, priorState });
+    void syncCurrentSessionLedger(session, deps);
     return state;
+}
+
+export function syncCurrentSessionLedger(session, deps = DEFAULT_RUNTIME_DEPS) {
+    const id = deps.currentSessionId(session);
+    if (!id) {
+        return undefined;
+    }
+    return deps.syncSessionLedger({ currentSessionId: id });
 }
 
 // Persists compaction usage, which arrives outside the normal turn lifecycle.

@@ -2,13 +2,13 @@
 
 This folder is a working reference for **native GitHub Copilot CLI extensions**: local `.mjs` extensions discovered from `.github/extensions/` or `~/.copilot/extensions/`.
 
-Version-specific claims in this folder are snapshots from the verification environment named in each file. This checkout currently has Copilot CLI 1.0.61 installed; re-run local verification before treating older 1.0.60 observations as current compatibility guarantees.
+Version-specific claims in this folder are snapshots from the verification environment named in each file. Copilot CLI 1.0.62 added plugin-shipped native extensions; re-run local verification before treating older 1.0.60/1.0.61 observations as current compatibility guarantees.
 
 These are not the same as:
 
 - **GitHub CLI (`gh`) extensions**.
 - **GitHub Copilot Extensions**, the GitHub App/server integration product.
-- **Copilot CLI plugins**, installed with `copilot plugin install`; plugins can ship skills, agents, hooks, MCP/LSP config, and other plugin components, but they do not currently install native `.github/extensions/<name>/extension.mjs` extensions as a first-class plugin component.
+- **Copilot CLI plugins**, installed with `copilot plugin install`; plugins can ship skills, agents, hooks, MCP/LSP config, and, as of Copilot CLI 1.0.62, native extensions under `extensions/<name>/extension.mjs`.
 
 ## Source status
 

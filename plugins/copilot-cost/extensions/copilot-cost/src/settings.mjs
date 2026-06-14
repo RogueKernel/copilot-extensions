@@ -6,14 +6,13 @@ import { DISPLAY, STYLE } from "./config.mjs";
 import { rm } from "node:fs/promises";
 import { readSessionLedger } from "./domain/session-ledger.mjs";
 import { SESSION_EXPORT_FILENAME, exportSessionData } from "./domain/session-export.mjs";
+import { currentSessionId, syncSessionLedger } from "./domain/session-sync.mjs";
 import { readJson, writeJson } from "./io.mjs";
 import { paint, parseFormat as parseFormatValue } from "./render/format.mjs";
 import { renderCostOverview } from "./render/overview.mjs";
 import { pluginDataDirectory, settingsPath } from "./storage.mjs";
 import { readState } from "./state.mjs";
-import { copilotHome as managedCopilotHome } from "../../../scripts/lib/paths.mjs";
-import { uninstallExtensionShim } from "../../../scripts/lib/shim.mjs";
-import { uninstallStatusline } from "../../../scripts/lib/statusline.mjs";
+import { uninstallStatusline } from "./statusline-setup.mjs";
 
 // Reads current preferences.
 export async function readSettings() {
@@ -213,6 +212,7 @@ async function promptFormat(session, settings, key, label) {
 
 async function promptExportSessionData(session, settings) {
     try {
+        await syncCurrentSessionLedger(session);
         const result = await exportSessionData();
         await session.log(`Exported ${result.sessionCount} Copilot CLI session records to ${result.outputPath}`);
         const selection = await selectChoice(session, [
@@ -236,8 +236,8 @@ async function promptClearPluginData(session) {
         "Clear copilot-cost plugin data?",
         "",
         `This removes all files under ${directory}.`,
-        "Settings, local ledger history, runtime totals, export state, and managed install state will be reset.",
-        "The plugin package, native extension shim, and Copilot settings are not removed.",
+        "Settings, local ledger history, runtime totals, export state, and managed statusline state will be reset.",
+        "The plugin package and Copilot settings are not removed.",
     ].join("\n"), DISPLAY.clearDataChoices);
 
     if (confirmed !== "Yes") {
@@ -260,7 +260,7 @@ async function promptUninstall(session) {
     const confirmed = await selectChoice(session, [
         "Uninstall copilot-cost?",
         "",
-        "This removes the managed native extension shim and restores prior Copilot statusline/footer settings.",
+        "This restores prior Copilot statusline/footer settings.",
         "The plugin package remains installed until you run: copilot plugin uninstall copilot-cost",
     ].join("\n"), DISPLAY.uninstallChoices);
 
@@ -277,19 +277,15 @@ async function promptUninstall(session) {
 }
 
 async function uninstallManagedExtension() {
-    const home = managedCopilotHome();
-    const shim = await uninstallExtensionShim({ copilotHome: home });
-    const statusline = await uninstallStatusline({ copilotHome: home });
-    return { shim, statusline };
+    return { statusline: await uninstallStatusline() };
 }
 
-function formatUninstallResult({ shim, statusline }) {
+function formatUninstallResult({ statusline }) {
     const lines = [
-        shim.removed ? `Removed native extension shim at ${shim.targetDirectory}` : shim.reason,
         statusline.statuslineSettingsChanged ? "Restored Copilot statusline settings." : "No managed statusline setting was active.",
     ];
     if (statusline.setupSkillEnabled) {
-        lines.push("Re-enabled the copilot-cost setup skill for future installs.");
+        lines.push("Removed stale ext-cost-setup disabled-skill entry.");
     }
     lines.push(
         "Restart Copilot CLI or run /clear for this change to take effect.",
@@ -307,11 +303,16 @@ async function overviewPrompt(session, settings) {
 }
 
 async function overviewText(session, settings) {
+    await syncCurrentSessionLedger(session);
     return renderCostOverview({
         ledger: await readSessionLedger(),
         state: await readState(session.workspacePath),
         settings,
     });
+}
+
+async function syncCurrentSessionLedger(session) {
+    await syncSessionLedger({ currentSessionId: currentSessionId(session) });
 }
 
 function infoPrompt() {
@@ -362,7 +363,7 @@ function settingsHelpText() {
         `- ${context}: current context usage and context limit.`,
         `- ${paint("Sess", STYLE.windows, true)}: cumulative official cost for the current Copilot CLI session.`,
         `- ${paint("24h/7d/30d", STYLE.windows, true)}: rolling cumulative costs from the local session ledger.`,
-        "- Footer output uses Copilot CLI's built-in Custom Footer; ext-cost-setup configures statusLine.command and footer.showCustom.",
+        "- Footer output uses Copilot CLI's built-in Custom Footer; copilot-cost configures statusLine.command and footer.showCustom on first run.",
     ].join("\n");
 }
 
@@ -376,7 +377,7 @@ function settingsSummaryText() {
         "- Format: customize after-message and footer summary templates.",
         "- Export Session Data: write COPILOT_COST_DEBUG.jsonl in the current directory.",
         "- Clear Plugin Data: remove all copilot-cost plugin-data files.",
-        "- Uninstall: remove the managed native extension shim and restore prior Copilot statusline/footer settings.",
+        "- Uninstall: restore prior Copilot footer settings.",
     ].join("\n");
 }
 

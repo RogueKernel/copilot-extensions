@@ -12,8 +12,12 @@ import {
 test("runExtension registers /cost and attaches session handlers", async () => {
     const session = new FakeSession();
     let joinOptions;
+    let startupRuns = 0;
 
     await runExtension({
+        startupTasks: async () => {
+            startupRuns += 1;
+        },
         importSdk: async () => ({
             joinSession: async (options) => {
                 joinOptions = options;
@@ -23,6 +27,7 @@ test("runExtension registers /cost and attaches session handlers", async () => {
     });
 
     assert.equal(joinOptions.commands[0].name, "cost");
+    assert.equal(startupRuns, 1);
     assert.deepEqual(session.eventNames(), [
         "assistant.turn_start",
         "assistant.usage",
@@ -279,6 +284,40 @@ test("finalizeTurn skips empty or already completed turns", async () => {
 
     assert.equal(await finalizeTurn(session, { events: 0, done: false }, {}, {}, deps), undefined);
     assert.equal(await finalizeTurn(session, { events: 1, done: true }, {}, {}, deps), undefined);
+});
+
+test("finalizeTurn starts a ledger sync after completed turn output", async () => {
+    const session = new FakeSession("/tmp/session-state/session-a");
+    const calls = [];
+    await finalizeTurn(session, {
+        events: 1,
+        startedAt: Date.UTC(2026, 0, 1),
+        nanoAiu: 1_000_000_000,
+    }, {}, {
+        timestamp: "2026-01-01T00:00:02.000Z",
+    }, {
+        readState: async () => undefined,
+        mergeState: async () => ({ totalUsd: 0.01 }),
+        readSettings: async () => ({ mode: "message", unit: "usd", messageFormat: "{cost}" }),
+        refreshUsageWindows: async () => ({}),
+        renderSummary: () => {
+            calls.push("message");
+            return "summary";
+        },
+        runFirstRunTasks: async () => {
+            calls.push("first-run");
+        },
+        syncSessionLedger: async (context) => {
+            calls.push(["sync", context]);
+        },
+    });
+
+    assert.deepEqual(session.logs, ["summary"]);
+    assert.deepEqual(calls, [
+        "message",
+        "first-run",
+        ["sync", { currentSessionId: "session-a" }],
+    ]);
 });
 
 test("finalizeCompaction persists successful compaction usage only", async () => {

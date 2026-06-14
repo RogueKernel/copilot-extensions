@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "Copilot CLI extensions and plugins for more visible, controllable agent workflows.",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "pluginRoot": "./plugins"
   },
   "plugins": [
     {
       "name": "copilot-cost",
       "description": "Show Copilot CLI message, conversation, session, context, cache, and rolling usage metrics.",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "source": "copilot-cost",
       "author": {
         "name": "RogueKernel",
@@ -22,7 +22,7 @@
       "repository": "https://github.com/RogueKernel/copilot-extensions",
       "license": "MIT",
       "category": "productivity",
-      "postInstallMessage": "Plugin installed successfully.\nYou can set up the extension by opening a fresh Copilot session, ensure experimental mode is on, then run `/copilot-cost:ext-cost-setup`.\nAll-in-one command: 'copilot --experimental -i \"/copilot-cost:ext-cost-setup\"'.",
+      "postInstallMessage": "Plugin installed successfully.\nOpen a fresh Copilot CLI session with experimental mode enabled, then run `/cost` to view or configure copilot-cost.\nThe bundled native extension is loaded directly by Copilot CLI; on first run it configures the custom footer/statusline.",
       "keywords": [
         "copilot",
         "cost",

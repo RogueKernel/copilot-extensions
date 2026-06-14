@@ -42,7 +42,7 @@ Make sure Copilot CLI is up to date:
 copilot update
 ```
 
-Make sure Node.js 18 or newer is installed and available as `node`. The setup script and `statusLine.command` both call `node` directly.
+Make sure Node.js 18 or newer is installed and available as `node`. The first-run footer setup writes a `statusLine.command` that calls `node` directly.
 
 Add this repository as a plugin marketplace, then install `copilot-cost`:
 
@@ -59,37 +59,22 @@ copilot --experimental
 
 `copilot --experimental` opens an interactive Copilot session and stays open, so do not chain another install command after it with `&&`. If you are already inside Copilot, make sure experimental mode is on with `/experimental on`.
 
-Then set up the bundled native extension by running:
-
-```text
-/copilot-cost:ext-cost-setup
-```
-
-Or use the all-in-one command:
-
-```sh
-copilot --experimental -i "/copilot-cost:ext-cost-setup"
-```
-
-Setup installs a managed native-extension shim at `~/.copilot/extensions/copilot-cost/extension.mjs`, configures `statusLine.command` to call the installed plugin directly with `node`, and enables `footer.showCustom`.
+Copilot CLI 1.0.62 and newer loads native extensions shipped by installed plugins. On first run, `copilot-cost` configures `statusLine.command` to call the plugin-bundled extension directly with `node`, enables `footer.showCustom`, and removes the old generated user shim if it was created by a previous setup version.
 
 Restart Copilot CLI, start a new session, or run `/clear`. If the extension does not appear, run `/extensions`, choose **manage**, and enable `copilot-cost`.
 
 ## Update
 
 ```sh
+copilot plugin marketplace update copilot-extensions
 copilot plugin update copilot-cost
 ```
 
-After updating, run `/copilot-cost:ext-cost-setup` again if you want to refresh the managed shim or statusline command. For local, unpushed changes, rerun:
-
-```sh
-copilot plugin install copilot-cost@copilot-extensions
-```
+After updating, open a new Copilot CLI session or run `/clear` so the updated plugin-bundled extension is reloaded.
 
 ## Uninstall
 
-Open `/cost`, choose **Settings**, then choose **Uninstall**. That removes the managed native-extension shim and restores any prior statusline/footer settings.
+Open `/cost`, choose **Settings**, then choose **Uninstall**. That restores any prior statusline/footer settings.
 
 Afterward, remove the plugin package if you no longer want it installed:
 
@@ -103,32 +88,11 @@ If you added this repository only for `copilot-cost`, you can also remove the ma
 copilot plugin marketplace remove copilot-extensions
 ```
 
-## Local marketplace test
-
-From any terminal, register this local checkout as a marketplace and install the plugin from it:
-
-```sh
-REPO="/path/to/copilot-extensions"
-copilot plugin marketplace remove copilot-extensions 2>/dev/null || true
-copilot plugin marketplace add "$REPO"
-copilot plugin install copilot-cost@copilot-extensions
-copilot --experimental
-```
-
-Inside Copilot CLI, run `/copilot-cost:ext-cost-setup`, then run `/clear` or start a new session and use `/cost`.
-
-To keep the test isolated from your real Copilot config:
-
-```sh
-export COPILOT_HOME="$(mktemp -d)"
-export COPILOT_CACHE_HOME="$COPILOT_HOME/cache"
-```
-
-Run the marketplace commands in the same shell after setting those variables.
+Local checkout install instructions for maintainers live in [`development.md`](development.md).
 
 ## Configure
 
-Use `/cost` for an interactive overview of recent local cost history. The top-level view shows current totals, 24h/7d/30d/60d/90d/180d cumulative totals, cost by calendar month for the current and previous four months, a six-month month-block calendar with blank pre-data days and dash-filled no-spend days after local data begins, usage-based billing cost since June 1, 2026, historical equivalent estimates for earlier retained telemetry, and run-rate analysis based on the available local data coverage. Choose **Info** for metric/source details or **Settings** to configure what the extension shows, where it appears, which unit to use, how summaries are formatted, export debug data, clear plugin data, or uninstall the managed extension.
+Use `/cost` for an interactive overview of recent local cost history. The top-level view shows current totals, 24h/7d/30d/60d/90d/180d cumulative totals, cost by calendar month for the current and previous four months, a six-month month-block calendar with blank pre-data days and dash-filled no-spend days after local data begins, usage-based billing cost since June 1, 2026, historical equivalent estimates for earlier retained telemetry, and run-rate analysis based on the available local data coverage. Choose **Info** for metric/source details or **Settings** to configure what the extension shows, where it appears, which unit to use, how summaries are formatted, export debug data, clear plugin data, or restore prior footer settings.
 
 ![copilot-cost overview dashboard](../assets/copilot-cost/copilot-cost-dashboard.png)
 
@@ -144,9 +108,9 @@ Direct commands:
 /cost credits
 ```
 
-The setup skill configures Copilot CLI's built-in Custom Footer through `statusLine.command` and enables `footer.showCustom`. If another statusline command already exists, setup replaces it with the `copilot-cost` command and saves the previous value so `/cost` > **Settings** > **Uninstall** can restore it. After the extension successfully starts and persists its first runtime state, it disables the one-time `ext-cost-setup` skill in `~/.copilot/settings.json`; uninstall removes that disabled-skill entry so future reinstalls can use the setup skill again.
+On first run, `copilot-cost` configures Copilot CLI's built-in Custom Footer through `statusLine.command` and enables `footer.showCustom`. If another statusline command already exists, it is replaced with `copilot-cost` and saved so `/cost` > **Settings** > **Uninstall** can restore it.
 
-The Settings view also includes maintenance actions. **Export Session Data** writes `COPILOT_COST_DEBUG.jsonl` to the current working directory with one redacted JSONL record per discovered local Copilot CLI session: event-file metadata, event/type counts, token/cost/model summaries, and any matching ledger record. It excludes prompts, responses, transcript text, tool arguments, source code, and absolute local paths; event-file paths are normalized to session-state labels. **Clear Plugin Data** removes the `copilot-cost` plugin-data folder, including settings, session ledger history, runtime totals, export state, and managed install state. It does not remove the plugin package, native extension shim, or Copilot settings.
+The Settings view also includes maintenance actions. **Export Session Data** writes `COPILOT_COST_DEBUG.jsonl` to the current working directory with one redacted JSONL record per discovered local Copilot CLI session: event-file metadata, event/type counts, token/cost/model summaries, and any matching ledger record. It excludes prompts, responses, transcript text, tool arguments, source code, and absolute local paths; event-file paths are normalized to session-state labels. **Clear Plugin Data** removes the `copilot-cost` plugin-data folder, including settings, session ledger history, runtime totals, export state, and managed statusline state. It does not remove the plugin package or Copilot settings.
 
 Defaults:
 

@@ -73,24 +73,22 @@ OpenAgent also documents a separate `child_process.fork()` gotcha: if an extensi
 
 ## Current `copilot-cost` pattern
 
-Current setup:
+Current setup on Copilot CLI 1.0.62 and newer:
 
 1. Install the plugin.
-2. Run `/copilot-cost:ext-cost-setup`.
-3. Skill finds the installed plugin root.
-4. Skill runs the bundled setup scripts, which create one generated native-extension shim:
+2. Start a fresh Copilot CLI session with experimental mode enabled.
+3. Copilot loads the plugin-bundled native extension directly from:
 
 ```text
-~/.copilot/extensions/copilot-cost/extension.mjs
+<installed-plugin>/extensions/copilot-cost/extension.mjs
 ```
 
-The generated native shim imports the bundled plugin extension by absolute file URL. Setup also updates `~/.copilot/settings.json` with `statusLine.command`, `footer.showCustom`, and `experimental`. The statusline command points at the installed plugin's bundled extension directly with `node`. If the user already has a statusline command, setup replaces it and stores the original managed-install baseline for uninstall restoration rather than trying to combine arbitrary shell commands. Because official config docs describe `statusLine.command` as an ordinary command that receives JSON on stdin, setup requires Node.js 18+ to be installed as `node` instead of trying to find alternate Node executables. This avoids creating a product-specific `~/.copilot/copilot-cost` folder.
+On first run, the extension updates `~/.copilot/settings.json` with `statusLine.command`, `footer.showCustom`, and `experimental`. The statusline command points at the installed plugin's bundled extension directly with `node`. If the user already has a statusline command, `copilot-cost` replaces it and stores the original baseline for `/cost` uninstall restoration rather than trying to combine arbitrary shell commands. Because official config docs describe `statusLine.command` as an ordinary command that receives JSON on stdin, first-run setup requires Node.js 18+ to be installed as `node` instead of trying to find alternate Node executables. The old generated user shim is removed only when it contains the known `copilot-cost` generated marker.
 
-Questions to investigate:
+Resolved by Copilot CLI 1.0.62:
 
-- Does `copilot plugin update` preserve the same plugin cache path for direct installs and marketplace installs?
-- Does reload discover a newly created user extension directory, or is a full CLI restart needed for first install?
-- Should the native shim also self-repair if its embedded plugin path becomes stale after update?
+- Plugin updates no longer depend on a user shim embedding an installed plugin path.
+- First install no longer needs a user extension directory to be created.
 
 ## What to look for in real-world repos
 
@@ -110,6 +108,5 @@ For each example extension, capture:
 
 These were identified during a packaging-focused review and need empirical verification:
 
-1. **Plugin update may break discovery indirection.** The native shim embeds an installed plugin path; rerun setup after plugin updates if discovery fails.
-2. **First-time refresh behavior needs verification.** `/clear`, starting a new session, full restart, and the agent environment's internal reload tool may not be equivalent for newly added user extensions across CLI versions. Current user-facing `/extensions` opens **manage** and **mode** menus, not a documented reload subcommand.
-3. **Node child-process behavior may differ under the native Copilot binary.** Extensions that call `child_process.fork()` may need extra testing because `process.execPath` can point at the Copilot binary rather than Node.
+1. **First-time refresh behavior still needs verification.** `/clear`, starting a new session, full restart, and the agent environment's internal reload tool may not be equivalent across CLI versions. Current user-facing `/extensions` opens **manage** and **mode** menus, not a documented reload subcommand.
+2. **Node child-process behavior may differ under the native Copilot binary.** Extensions that call `child_process.fork()` may need extra testing because `process.execPath` can point at the Copilot binary rather than Node.

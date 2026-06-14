@@ -65,6 +65,171 @@ test("syncSessionLedger parses only new sessions and classifies closed/open/auto
     assert.equal(ledger.sessions.stale.totalNanoAiu, 1_000_000_000);
 });
 
+test("syncSessionLedger folds VS Code telemetry into the existing ledger", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const vsCodeRoot = await mkdtemp(join(tmpdir(), "copilot-cost-vscode-user-"));
+    const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
+    const now = Date.UTC(2026, 5, 10, 12);
+    const chatDir = join(vsCodeRoot, "workspaceStorage", "workspace-a", "chatSessions");
+    await mkdir(chatDir, { recursive: true });
+    await writeFile(join(chatDir, "session-vscode.jsonl"), [
+        JSON.stringify({ kind: 0, v: { sessionId: "session-vscode", requests: [] } }),
+        JSON.stringify({
+            kind: 2,
+            k: ["requests"],
+            v: [{
+                requestId: "request-vscode",
+                timestamp: now - 1_000,
+                result: {
+                    details: "GPT-5.3-Codex • 2.4 credits",
+                    metadata: {
+                        sessionId: "session-vscode",
+                        resolvedModel: "gpt-5.3-codex",
+                        promptTokens: 100,
+                        outputTokens: 10,
+                    },
+                },
+            }],
+        }),
+    ].join("\n"));
+
+    const ledger = await syncSessionLedger({
+        currentSessionId: "current",
+        sessionStateRoot: root,
+        ledgerPath,
+        vsCodeUserRoots: [vsCodeRoot],
+        now,
+    });
+    const vsCode = Object.values(ledger.sessions).find((session) => session.id.startsWith("vscode:"));
+
+    assert.ok(vsCode);
+    assert.equal(vsCode.state, STATE_OPEN);
+    assert.equal(vsCode.source, SOURCE_USAGE_EVENTS);
+    assert.equal(vsCode.totalNanoAiu, 2_400_000_000);
+    assert.deepEqual(vsCode.modelMetrics["gpt-5.3-codex"], {
+        totalNanoAiu: 2_400_000_000,
+        tokenTotals: {
+            inputTokens: 100,
+            outputTokens: 10,
+            requestCount: 1,
+        },
+    });
+});
+
+test("syncSessionLedger upgrades partial VS Code telemetry when final details arrive", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const vsCodeRoot = await mkdtemp(join(tmpdir(), "copilot-cost-vscode-user-"));
+    const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
+    const now = Date.UTC(2026, 5, 10, 12);
+    const chatDir = join(vsCodeRoot, "workspaceStorage", "workspace-a", "chatSessions");
+    const chatPath = join(chatDir, "session-vscode.jsonl");
+    await mkdir(chatDir, { recursive: true });
+    await writeFile(chatPath, [
+        JSON.stringify({ kind: 0, v: { sessionId: "session-vscode", requests: [] } }),
+        JSON.stringify({
+            kind: 2,
+            k: ["requests"],
+            v: [{
+                requestId: "request-vscode",
+                timestamp: now - 1_000,
+                result: { metadata: { sessionId: "session-vscode", outputTokens: 10 } },
+            }],
+        }),
+    ].join("\n"));
+
+    const partial = await syncSessionLedger({
+        sessionStateRoot: root,
+        ledgerPath,
+        vsCodeUserRoots: [vsCodeRoot],
+        now,
+    });
+    const partialVsCode = Object.values(partial.sessions).find((session) => session.id.startsWith("vscode:"));
+    assert.ok(partialVsCode);
+    assert.equal(partialVsCode.source, "none");
+    assert.equal(partialVsCode.totalNanoAiu, undefined);
+    assert.deepEqual(partialVsCode.tokenTotals, { outputTokens: 10, requestCount: 1 });
+
+    await writeFile(chatPath, [
+        JSON.stringify({ kind: 0, v: { sessionId: "session-vscode", requests: [] } }),
+        JSON.stringify({
+            kind: 2,
+            k: ["requests"],
+            v: [{
+                requestId: "request-vscode",
+                timestamp: now - 500,
+                result: {
+                    details: "Claude Opus 4.8 • 119.5 credits",
+                    metadata: {
+                        sessionId: "session-vscode",
+                        resolvedModel: "copilot/claude-opus-4-8",
+                        promptTokens: 34193,
+                        outputTokens: 1875,
+                    },
+                },
+            }],
+        }),
+    ].join("\n"));
+    await touch(chatPath, now + 1_000);
+
+    const final = await syncSessionLedger({
+        sessionStateRoot: root,
+        ledgerPath,
+        vsCodeUserRoots: [vsCodeRoot],
+        now: now + 2_000,
+    });
+    const finalVsCode = final.sessions[partialVsCode.id];
+    assert.equal(finalVsCode.source, SOURCE_USAGE_EVENTS);
+    assert.equal(finalVsCode.totalNanoAiu, 119_500_000_000);
+    assert.deepEqual(finalVsCode.tokenTotals, {
+        inputTokens: 34193,
+        outputTokens: 1875,
+        requestCount: 1,
+    });
+    assert.deepEqual(finalVsCode.modelMetrics["claude-opus-4.8"], {
+        totalNanoAiu: 119_500_000_000,
+        tokenTotals: {
+            inputTokens: 34193,
+            outputTokens: 1875,
+            requestCount: 1,
+        },
+    });
+});
+
+test("syncSessionLedger skips new VS Code telemetry outside the retention horizon", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const vsCodeRoot = await mkdtemp(join(tmpdir(), "copilot-cost-vscode-user-"));
+    const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
+    const now = Date.UTC(2026, 11, 1, 12);
+    const chatDir = join(vsCodeRoot, "workspaceStorage", "workspace-a", "chatSessions");
+    const chatPath = join(chatDir, "old-session.jsonl");
+    await mkdir(chatDir, { recursive: true });
+    await writeFile(chatPath, [
+        JSON.stringify({ kind: 0, v: { sessionId: "old-session", requests: [] } }),
+        JSON.stringify({
+            kind: 2,
+            k: ["requests"],
+            v: [{
+                requestId: "old-request",
+                timestamp: now - 181 * day,
+                result: {
+                    details: "GPT-5.3-Codex • 2.4 credits",
+                    metadata: { sessionId: "old-session", resolvedModel: "gpt-5.3-codex" },
+                },
+            }],
+        }),
+    ].join("\n"));
+    await touch(chatPath, now - 181 * day);
+
+    const ledger = await syncSessionLedger({
+        sessionStateRoot: root,
+        ledgerPath,
+        vsCodeUserRoots: [vsCodeRoot],
+        now,
+    });
+
+    assert.equal(Object.values(ledger.sessions).some((session) => session.id.startsWith("vscode:")), false);
+});
+
 test("syncSessionLedger lets shutdown totals replace known live statusline totals", async () => {
     const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
     const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");

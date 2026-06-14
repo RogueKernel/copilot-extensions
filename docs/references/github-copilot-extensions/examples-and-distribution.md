@@ -9,7 +9,7 @@ The `github/awesome-copilot` repository has separate top-level areas for Copilot
 - `plugins/` — Copilot CLI plugins using `plugin.json`, skills, agents, hooks, MCP/LSP config, and related plugin components.
 - `extensions/` — SDK-style extensions using `extension.mjs` and `@github/copilot-sdk/extension`.
 
-This separation is important: it supports the conclusion that plugins and native SDK extensions are distinct systems.
+This separation is historical context. Copilot CLI 1.0.62 can load native extensions shipped inside installed plugins, while project/user native-extension paths still exist.
 
 Examples reviewed at `github/awesome-copilot` commit `a94b92d`:
 
@@ -32,9 +32,9 @@ Examples reported by verification:
 - `htekdev/copilot-self-restart` — minimal one-file native extension installed by manual copy.
 - `shsolomo/myelin` — TypeScript native extension bundled with esbuild and installed through setup tooling.
 
-The `openagent` wrapper pattern is similar in spirit to `copilot-cost`'s plugin setup workaround: put something discoverable in the native extension path, then delegate to maintained code elsewhere.
+The `openagent` wrapper pattern is similar to `copilot-cost`'s old plugin setup workaround: put something discoverable in the native extension path, then delegate to maintained code elsewhere.
 
-OpenAgent's installer writes a generated native wrapper rather than a symlink. The wrapper imports a built bundle elsewhere, records a fingerprint, and can re-run setup if the wrapper is stale. This is a useful comparison point for `copilot-cost`, which now also uses a generated native shim while keeping the richer self-repair idea as future work.
+OpenAgent's installer writes a generated native wrapper rather than a symlink. The wrapper imports a built bundle elsewhere, records a fingerprint, and can re-run setup if the wrapper is stale. This remains useful historical context for pre-1.0.62 environments.
 
 The public cost-extension peer is especially relevant: it treats plugin install, native extension registration, and statusline configuration as separate setup steps. Its native registration is a generated forwarder file in `~/.copilot/extensions/`, not a directory symlink.
 
@@ -44,9 +44,10 @@ Current practical options:
 
 1. **Project-scoped native extension**: commit `.github/extensions/<name>/extension.mjs` into a repository. It loads when Copilot CLI is run in that project.
 2. **User-scoped native extension**: place or link code under `~/.copilot/extensions/<name>/extension.mjs`.
-3. **Copilot plugin wrapper**: distribute a plugin, then use a skill or installer to write a managed shim, copy files, or link code into the user extension path.
+3. **Plugin-shipped native extension**: distribute a plugin containing `extensions/<name>/extension.mjs`; Copilot CLI 1.0.62 and newer loads it from the installed plugin.
+4. **Legacy plugin wrapper**: distribute a plugin, then use a skill or installer to write a managed shim, copy files, or link code into the user extension path.
 
-The third option is a workaround. The official plugin schema does not currently include a first-class native-extension component field.
+The fourth option is a workaround for older CLI versions or projects with custom installer needs.
 
 ## Plugin install paths
 
@@ -59,4 +60,4 @@ copilot plugin install OWNER/REPO:PATH/TO/PLUGIN
 copilot plugin install ./local-plugin
 ```
 
-Direct subdirectory installs are valid for plugins, but they still install plugin components into the plugin cache. They do not automatically register native SDK extensions.
+Direct subdirectory installs are valid for plugins. On Copilot CLI 1.0.62 and newer, a plugin installed this way can also expose a bundled native SDK extension.

@@ -37,21 +37,21 @@ They use `@github/copilot-sdk/extension` and run as child processes attached to 
 
 ## Can plugins install native extensions?
 
-Current conclusion: **not as a first-class plugin component**.
+Current conclusion for Copilot CLI 1.0.62 and newer: **yes, plugins can ship native extensions**.
 
-The official plugin component list includes `agents`, `skills`, `commands`, `hooks`, `mcpServers`, and `lspServers`; it does not list native `.github/extensions/<name>/extension.mjs` extensions as a plugin component type.
+The 1.0.62 changelog says: "Plugins can now ship extensions, making them installable via the plugin marketplace." Installed plugin extensions are discovered from plugin `extensions/<name>/extension.mjs` directories.
 
-The `copilot-cost` wrapper therefore uses a setup skill to write a generated native-extension shim into the user native-extension discovery path:
+Older `copilot-cost` versions used a setup skill to write a generated native-extension shim into the user native-extension discovery path:
 
 ```text
 ~/.copilot/extensions/copilot-cost/extension.mjs
 ```
 
-That shim imports the bundled plugin extension from the installed plugin cache by absolute file URL. It keeps the native discovery directory small and avoids linking the whole plugin root.
+That shim imported the bundled plugin extension from the installed plugin cache by absolute file URL. It is now legacy migration state only.
 
-This is a workaround, not an official plugin-native-extension bridge.
+The first-run cleanup removes only shims containing the known generated marker and leaves unmanaged user extensions alone.
 
-## Direct plugin install is valid, but not sufficient
+## Direct plugin install is sufficient on current CLI
 
 The Copilot CLI plugin reference supports direct subdirectory installs:
 
@@ -59,6 +59,4 @@ The Copilot CLI plugin reference supports direct subdirectory installs:
 copilot plugin install OWNER/REPO:PATH/TO/PLUGIN
 ```
 
-That installs the plugin into Copilot's plugin cache. It does not, by itself, make a native `extension.mjs` visible to the native extension loader.
-
-For `copilot-cost`, direct plugin install is a cleaner way to get the setup skill onto the user's machine, but the setup skill is still needed to create the managed shim at `~/.copilot/extensions/copilot-cost/extension.mjs`.
+On Copilot CLI 1.0.62 and newer, installing the plugin also makes the bundled native extension visible to the native extension loader.

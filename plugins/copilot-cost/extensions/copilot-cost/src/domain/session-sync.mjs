@@ -15,6 +15,7 @@ import {
     updateSessionLedger,
 } from "./session-ledger.mjs";
 import { parseSessionEvents } from "./session-jsonl.mjs";
+import { discoverVsCodeTelemetryGroups, parseVsCodeTelemetryGroup } from "./vscode-session.mjs";
 import { HISTORY } from "../config.mjs";
 import { optNum } from "../math.mjs";
 import { sessionLedgerPath, sessionStateRootPath } from "../storage.mjs";
@@ -25,9 +26,12 @@ const RETENTION_MS = HISTORY.retentionDays * DAY_MS;
 export async function syncSessionLedger({
     currentSessionId,
     sessionStateRoot = sessionStateRootPath(),
+    includeVsCodeTelemetry,
+    vsCodeUserRoots,
     ledgerPath = sessionLedgerPath(),
     now = Date.now(),
 } = {}) {
+    const shouldIncludeVsCode = includeVsCodeTelemetry ?? (vsCodeUserRoots !== undefined || ledgerPath === sessionLedgerPath());
     const snapshot = await readSessionLedger(ledgerPath);
     const parsedSessions = [];
     for (const file of await discoverSessionEventFiles(sessionStateRoot)) {
@@ -36,6 +40,14 @@ export async function syncSessionLedger({
             continue;
         }
         parsedSessions.push(await parseSessionEvents(file.path, { id: file.id }));
+    }
+    if (shouldIncludeVsCode) {
+        for (const group of await discoverVsCodeTelemetryGroups({ userRoots: vsCodeUserRoots })) {
+            const prior = snapshot.sessions[group.id];
+            if (shouldParseVsCodeSession(prior, group, now)) {
+                parsedSessions.push(...await parseVsCodeTelemetryGroup(group));
+            }
+        }
     }
 
     return updateSessionLedger((existing) => syncSessionLedgerValue(existing, {
@@ -79,6 +91,14 @@ function eventFileChanged(prior, file) {
         || priorMtime === undefined
         || priorSize !== file.size
         || Math.abs(priorMtime - file.mtimeMs) > 1;
+}
+
+function shouldParseVsCodeSession(prior, parsed, now) {
+    if (!prior) {
+        const seenAt = optNum(parsed.lastSeenAt) ?? optNum(parsed.eventFileMtimeMs);
+        return seenAt === undefined || seenAt >= now - RETENTION_MS;
+    }
+    return eventFileChanged(prior, parsed);
 }
 
 export async function discoverSessionEventFiles(root = sessionStateRootPath()) {

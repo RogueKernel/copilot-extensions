@@ -17,7 +17,30 @@ Run one test file:
 node --test test/unit/cost.test.mjs
 ```
 
-There is no separate lint or build script. `npm run check` syntax-checks the extension entrypoint and plugin setup scripts, and `npm run validate` runs tests, syntax check, and the statusline smoke test.
+There is no separate lint or build script. `npm run check` syntax-checks the extension entrypoint and source modules, and `npm run validate` runs tests, syntax check, and the statusline smoke test.
+
+## Install from a local checkout
+
+These commands are for maintainers testing local, unpushed changes. End users should use the marketplace install and update commands in [`usage.md`](usage.md).
+
+From any terminal, register this local checkout as a marketplace and install from it:
+
+```sh
+REPO="/path/to/copilot-extensions"
+copilot plugin marketplace remove copilot-extensions 2>/dev/null || true
+copilot plugin marketplace add "$REPO"
+copilot plugin install copilot-cost@copilot-extensions
+copilot --experimental
+```
+
+Inside Copilot CLI, run `/clear` or start a new session, then use `/cost`.
+
+To keep the test isolated from your real Copilot config, set isolated homes before the marketplace commands:
+
+```sh
+export COPILOT_HOME="$(mktemp -d)"
+export COPILOT_CACHE_HOME="$COPILOT_HOME/cache"
+```
 
 ## Dependencies
 
@@ -34,7 +57,7 @@ Tests are split by scope:
 | `test/unit/` | Small pure behavior such as accounting, estimates, rendering, settings parsers, state paths, and runtime seams. |
 | `test/e2e/` | Process behavior such as statusline stdin-to-stdout rendering and state persistence. |
 
-After editing extension or setup-script code, run `npm run validate` from `plugins/copilot-cost/extensions/copilot-cost`.
+After editing extension code, run `npm run validate` from `plugins/copilot-cost/extensions/copilot-cost`.
 
 ## Contributor conventions
 

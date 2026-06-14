@@ -4,7 +4,7 @@ This repository is a Copilot CLI plugin marketplace. The active plugin is `copil
 
 ## Build, test, and lint commands
 
-- Syntax-check the extension and setup scripts: `cd plugins/copilot-cost/extensions/copilot-cost && npm run check`
+- Syntax-check the extension: `cd plugins/copilot-cost/extensions/copilot-cost && npm run check`
 - Run the full test suite: `cd plugins/copilot-cost/extensions/copilot-cost && npm test`
 - Run one test file: `cd plugins/copilot-cost/extensions/copilot-cost && node --test test/unit/cost.test.mjs`
 - Smoke-test the statusline runtime with isolated settings: `cd plugins/copilot-cost/extensions/copilot-cost && npm run smoke:statusline`
@@ -14,7 +14,7 @@ This repository is a Copilot CLI plugin marketplace. The active plugin is `copil
 ## Architecture pointers
 
 - Marketplace manifest: `.github/plugin/marketplace.json`; plugin root: `plugins/copilot-cost`; bundled extension: `plugins/copilot-cost/extensions/copilot-cost`.
-- Plugins do not yet install native `.github/extensions/<name>/extension.mjs` extensions as first-class artifacts. `ext-cost-setup` writes a managed user-extension shim at `~/.copilot/extensions/copilot-cost/extension.mjs`.
+- Copilot CLI 1.0.62 and newer loads plugin-shipped native extensions from installed plugin `extensions/<name>/extension.mjs` directories. `copilot-cost` no longer uses a setup skill or managed user-extension shim.
 - `extension.mjs` stays thin: normal sessions use `src/runtime/extension.mjs`; statusline invocations run `node extension.mjs --statusline` and use `src/runtime/statusline.mjs`.
 - Copilot-owned configuration remains in `~/.copilot/settings.json`. Product-owned runtime data lives under `${COPILOT_PLUGIN_DATA}` or `~/.copilot/plugin-data/copilot-extensions/copilot-cost`.
 - Native extension behavior is underdocumented. Use `docs/references/github-copilot-extensions/` for verified local behavior; keep plugin behavior aligned with docs.github.com.

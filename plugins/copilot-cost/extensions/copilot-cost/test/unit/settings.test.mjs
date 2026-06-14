@@ -1,13 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { DISPLAY, STYLE } from "../../src/config.mjs";
 import { displays, parseFormat, parseMode, parseUnit } from "../../src/settings.mjs";
-import { GENERATED_MARKER } from "../../../../scripts/lib/paths.mjs";
 
 test("parses mode aliases", () => {
     assert.equal(parseMode("after-message"), "message");
@@ -162,6 +161,25 @@ test("configure logs usage when direct arguments are unknown and elicitation is 
     });
 });
 
+test("configure syncs the current ledger before rendering the overview", async () => {
+    const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
+    const result = JSON.parse(await runSettingsScript(home, `
+        import { readFile } from "node:fs/promises";
+        import { join } from "node:path";
+        import { configure } from "./src/settings.mjs";
+        const logs = [];
+        await configure({
+            workspacePath: join(process.env.COPILOT_HOME, "session-state", "current-session"),
+            log: async (value) => logs.push(value),
+        }, { args: "unknown" });
+        const ledger = JSON.parse(await readFile(join(process.env.COPILOT_PLUGIN_DATA, "session-ledger.json"), "utf8"));
+        console.log(JSON.stringify({ logs, ledger }));
+    `));
+
+    assert.match(result.logs[0], /Cost overview/);
+    assert.equal(result.ledger.sessions["current-session"].state, "open");
+});
+
 test("configure applies interactive settings when elicitation is available", async () => {
     const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
     const result = JSON.parse(await runSettingsScript(home, `
@@ -273,6 +291,7 @@ test("interactive settings submenu uses compact settings copy", async () => {
     assert.match(settingsPrompt, /Configure where copilot-cost appears/);
     assert.match(settingsPrompt, /Display location: after-message output/);
     assert.match(settingsPrompt, /Clear Plugin Data: remove all copilot-cost plugin-data files/);
+    assert.match(settingsPrompt, /Uninstall: restore prior Copilot footer settings/);
     assert.doesNotMatch(settingsPrompt, /After-message example:/);
 });
 
@@ -301,12 +320,12 @@ test("interactive settings ignores typed values outside fixed choices", async ()
     });
 });
 
-test("interactive uninstall removes managed files after confirmation", async () => {
+test("interactive uninstall restores managed statusline settings after confirmation", async () => {
     const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
     await writeManagedInstall(home);
 
     const result = JSON.parse(await runSettingsScript(home, `
-        import { readFile, stat } from "node:fs/promises";
+        import { readFile } from "node:fs/promises";
         import { join } from "node:path";
         import { configure } from "./src/settings.mjs";
         const logs = [];
@@ -322,37 +341,25 @@ test("interactive uninstall removes managed files after confirmation", async () 
             log: async (value) => logs.push(value),
         }, { args: "" });
 
-        let shimExists = true;
-        try {
-            await stat(join(process.env.COPILOT_HOME, "extensions", "copilot-cost"));
-        } catch (error) {
-            if (error.code === "ENOENT") {
-                shimExists = false;
-            } else {
-                throw error;
-            }
-        }
         const copilotSettings = JSON.parse(await readFile(join(process.env.COPILOT_HOME, "settings.json"), "utf8"));
-        console.log(JSON.stringify({ logs, shimExists, copilotSettings }));
+        console.log(JSON.stringify({ logs, copilotSettings }));
     `));
 
-    assert.equal(result.shimExists, false);
     assert.equal(Object.hasOwn(result.copilotSettings, "statusLine"), false);
     assert.deepEqual(result.copilotSettings.footer, {});
     assert.deepEqual(result.copilotSettings.disabledSkills, ["other-skill"]);
-    assert.match(result.logs[0], /Removed native extension shim at /);
     assert.match(result.logs[0], /Restored Copilot statusline settings/);
-    assert.match(result.logs[0], /Re-enabled the copilot-cost setup skill/);
+    assert.match(result.logs[0], /Removed stale ext-cost-setup disabled-skill entry/);
     assert.match(result.logs[0], /Restart Copilot CLI or run \/clear/);
     assert.match(result.logs[0], /copilot plugin uninstall copilot-cost/);
 });
 
-test("interactive uninstall cancellation leaves managed files untouched", async () => {
+test("interactive uninstall cancellation leaves statusline settings untouched", async () => {
     const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
     await writeManagedInstall(home);
 
     const result = JSON.parse(await runSettingsScript(home, `
-        import { readFile, stat } from "node:fs/promises";
+        import { readFile } from "node:fs/promises";
         import { join } from "node:path";
         import { configure } from "./src/settings.mjs";
         const logs = [];
@@ -368,13 +375,11 @@ test("interactive uninstall cancellation leaves managed files untouched", async 
             log: async (value) => logs.push(value),
         }, { args: "" });
 
-        const shim = await stat(join(process.env.COPILOT_HOME, "extensions", "copilot-cost", "extension.mjs"));
         const copilotSettings = JSON.parse(await readFile(join(process.env.COPILOT_HOME, "settings.json"), "utf8"));
-        console.log(JSON.stringify({ logs, shimIsFile: shim.isFile(), copilotSettings }));
+        console.log(JSON.stringify({ logs, copilotSettings }));
     `));
 
     assert.deepEqual(result.logs, ["Uninstall canceled."]);
-    assert.equal(result.shimIsFile, true);
     assert.match(result.copilotSettings.statusLine.command, /copilot-cost/);
     assert.deepEqual(result.copilotSettings.disabledSkills, ["other-skill", "ext-cost-setup"]);
 });
@@ -466,10 +471,13 @@ test("interactive clear plugin data cancellation leaves plugin-data untouched", 
 
 test("interactive settings can export session data and return to settings", async () => {
     const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
+    const exportDir = await mkdtemp(join(tmpdir(), "copilot-cost-settings-export-"));
     const result = JSON.parse(await runSettingsScript(home, `
         import { mkdir, readFile, writeFile } from "node:fs/promises";
         import { join } from "node:path";
         import { configure } from "./src/settings.mjs";
+
+        process.chdir(${JSON.stringify(exportDir)});
 
         const sessionDir = join(process.env.COPILOT_HOME, "session-state", "session-a");
         await mkdir(sessionDir, { recursive: true });
@@ -504,7 +512,7 @@ test("interactive settings can export session data and return to settings", asyn
             log: async (value) => logs.push(value),
         }, { args: "" });
 
-        const rows = (await readFile(join(process.cwd(), "COPILOT_COST_DEBUG.jsonl"), "utf8")).trim().split("\\n").map(JSON.parse);
+        const rows = (await readFile(join(${JSON.stringify(exportDir)}, "COPILOT_COST_DEBUG.jsonl"), "utf8")).trim().split("\\n").map(JSON.parse);
         console.log(JSON.stringify({ logs, requests, rows }));
     `));
 
@@ -583,10 +591,6 @@ async function writeSettings(home, value) {
 }
 
 async function writeManagedInstall(home) {
-    const shimPath = join(home, ".copilot", "extensions", "copilot-cost", "extension.mjs");
-    await mkdir(dirname(shimPath), { recursive: true });
-    await writeFile(shimPath, `// ${GENERATED_MARKER}\n`);
-
     const copilotSettingsPath = join(home, ".copilot", "settings.json");
     await mkdir(dirname(copilotSettingsPath), { recursive: true });
     await writeFile(copilotSettingsPath, JSON.stringify({
@@ -603,6 +607,7 @@ async function writeManagedInstall(home) {
         hadStatusLine: false,
         hadFooterShowCustom: false,
     }));
+    await assert.rejects(() => stat(join(home, ".copilot", "extensions", "copilot-cost", "extension.mjs")), { code: "ENOENT" });
 }
 
 async function runSettingsScript(home, source) {

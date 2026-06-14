@@ -1,7 +1,7 @@
 {
   "name": "copilot-cost",
   "description": "Show Copilot CLI message, conversation, cumulative session, context, cache, and rolling usage metrics.",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": {
     "name": "RogueKernel",
     "url": "https://github.com/RogueKernel"
@@ -10,8 +10,7 @@
   "repository": "https://github.com/RogueKernel/copilot-extensions",
   "license": "MIT",
   "category": "productivity",
-  "skills": "skills/",
-  "postInstallMessage": "Plugin installed successfully.\nYou can set up the extension by opening a fresh Copilot session, ensure experimental mode is on, then run `/copilot-cost:ext-cost-setup`.\nAll-in-one command: 'copilot --experimental -i \"/copilot-cost:ext-cost-setup\"'.",
+  "postInstallMessage": "Plugin installed successfully.\nOpen a fresh Copilot CLI session with experimental mode enabled, then run `/cost` to view or configure copilot-cost.\nThe bundled native extension is loaded directly by Copilot CLI; on first run it configures the custom footer/statusline.",
   "keywords": [
     "copilot",
     "cost",

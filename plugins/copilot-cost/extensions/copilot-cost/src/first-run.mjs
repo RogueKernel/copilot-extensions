@@ -1,35 +1,27 @@
 // One-time startup actions that are safe to run after the extension has
 // successfully persisted its first usable state file.
 
-import { SETUP } from "./config.mjs";
-import { readJson, writeJson } from "./io.mjs";
-import { copilotSettingsPath } from "./storage.mjs";
+import { configureStatusline, removeLegacyShim } from "./statusline-setup.mjs";
+
+export async function runStartupTasks(options = {}) {
+    const [statusline, legacyShimRemoved] = await Promise.all([
+        configureStatusline(options),
+        removeLegacyShim(options),
+    ]);
+    return {
+        statuslineConfigured: statusline.statuslineConfigured,
+        legacyShimRemoved,
+    };
+}
 
 // Runs first-run tasks after a successful state write.
 export async function runFirstRunTasks({ workspacePath, priorState } = {}, options = {}) {
     if (!workspacePath || priorState !== undefined) {
-        return { firstRun: false, setupSkillDisabled: false };
+        return { firstRun: false, statuslineConfigured: false, legacyShimRemoved: false };
     }
+    const result = await runStartupTasks(options);
     return {
         firstRun: true,
-        setupSkillDisabled: await disableSetupSkill(options),
+        ...result,
     };
-}
-
-// Adds the setup skill to Copilot CLI's disabledSkills list.
-export async function disableSetupSkill({
-    settingsPath = copilotSettingsPath(),
-    skillName = SETUP.skillName,
-} = {}) {
-    const settings = await readJson(settingsPath) ?? {};
-    const disabledSkills = Array.isArray(settings.disabledSkills) ? settings.disabledSkills : [];
-    if (disabledSkills.includes(skillName)) {
-        return false;
-    }
-
-    await writeJson(settingsPath, {
-        ...settings,
-        disabledSkills: [...disabledSkills, skillName],
-    });
-    return true;
 }

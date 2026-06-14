@@ -11,10 +11,6 @@ export const BILLING = {
     newWorkSampleLimit: 5,
 };
 
-export const SETUP = {
-    skillName: "ext-cost-setup",
-};
-
 export const HISTORY = {
     retentionDays: 180,
     moneyPricingStartedAt: Date.UTC(2026, 5, 1),

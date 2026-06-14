@@ -4,14 +4,14 @@
 
 ## Source layout
 
-The bundled native extension entrypoint is `plugins/copilot-cost/extensions/copilot-cost/extension.mjs`. Installed users run it through a managed shim at `~/.copilot/extensions/copilot-cost/extension.mjs`. The entrypoint only chooses the runtime:
+The bundled native extension entrypoint is `plugins/copilot-cost/extensions/copilot-cost/extension.mjs`. Copilot CLI 1.0.62 and newer loads it directly from the installed plugin. The entrypoint only chooses the runtime:
 
 | Runtime | Launch path | Responsibility |
 | --- | --- | --- |
 | Extension runtime | Imported by the Copilot extension bootstrap | Listens to usage events and persists conversation/runtime state. |
-| Statusline runtime | `<setup-node> extension.mjs --statusline` | Reads one JSON status payload from stdin, refreshes stored display state, and prints footer text. |
+| Statusline runtime | `node extension.mjs --statusline` | Reads one JSON status payload from stdin, refreshes stored display state, and prints footer text. |
 
-Copilot CLI discovers project extensions from immediate subdirectories under `.github/extensions/`; each extension must keep a file named exactly `extension.mjs`. User-scoped extensions can also live under `~/.copilot/extensions/`. The marketplace plugin does not make native extensions first-class install artifacts yet, so the setup script writes the user-scoped shim explicitly.
+Copilot CLI discovers project extensions from immediate subdirectories under `.github/extensions/`, user extensions under `~/.copilot/extensions/`, and plugin-shipped extensions under installed plugin `extensions/<name>/extension.mjs` directories.
 
 Implementation lives under `plugins/copilot-cost/extensions/copilot-cost/src/`:
 
@@ -38,7 +38,7 @@ The `/cost` Settings flow can also run a diagnostic export. **Export Session Dat
 
 Sub-agent lifecycle events carry an `agentId`; the runtime ignores those for main-session turn timing and context updates so sub-agent work does not distort the active user's turn.
 
-Footer output uses Copilot CLI's built-in Custom Footer. The setup script configures `statusLine.command`, enables `footer.showCustom`, and points the command at the plugin-bundled extension directly with `node`. The command is run by Copilot as a normal configured executable, not as a native extension subprocess, so Node.js 18+ must be installed and available as `node`. If another statusline command already exists, setup replaces it with the `copilot-cost` command; the previous value is saved for managed uninstall restoration. `Total` is the reconciled best-known conversation total. The cumulative totals group shows `Sess`, Copilot's raw official CLI session aggregate, alongside ledger-derived rolling 24h/7d/30d totals.
+Footer output uses Copilot CLI's built-in Custom Footer. On first run, the native extension configures `statusLine.command`, enables `footer.showCustom`, and points the command at the plugin-bundled extension directly with `node`. The command is run by Copilot as a normal configured executable, not as a native extension subprocess, so Node.js 18+ must be installed and available as `node`. If another statusline command already exists, `copilot-cost` replaces it and saves the previous value for `/cost` > **Settings** > **Uninstall** restoration. `Total` is the reconciled best-known conversation total. The cumulative totals group shows `Sess`, Copilot's raw official CLI session aggregate, alongside ledger-derived rolling 24h/7d/30d totals.
 
 ## Accounting boundaries
 
@@ -104,7 +104,7 @@ Token-only stale sessions are estimated only when a model/token-class rate is av
 | --- | --- | --- |
 | `~/.copilot/plugin-data/copilot-extensions/copilot-cost/settings.json` | Global user | Display mode, unit, and custom formats. |
 | `~/.copilot/plugin-data/copilot-extensions/copilot-cost/session-ledger.json` | Global user | Single cost/state file. Stores compact per-Copilot-session cost records plus lean runtime display/reconciliation state. |
-| `~/.copilot/plugin-data/copilot-extensions/copilot-cost/install-state.json` | Plugin installer | Previous statusline/footer settings used by managed uninstall. |
+| `~/.copilot/plugin-data/copilot-extensions/copilot-cost/install-state.json` | Footer setup | Previous statusline/footer settings used by `/cost` uninstall. |
 | `./COPILOT_COST_DEBUG.jsonl` | Current working directory, on demand | Redacted diagnostic JSONL export generated only by **Export Session Data**. |
 
 Rolling 24-hour, 7-day, and 30-day totals are calculated from `session-ledger.json`. Exact usage-based costs come from `session.shutdown.data.totalNanoAiu`, with summed `session.shutdown.data.modelMetrics.*.totalNanoAiu` as fallback. Live open sessions are maintained from statusline `session_id` plus `ai_used.total_nano_aiu`; stale open sessions older than 7 days become `auto_closed`, preserving any live usage-based total or using a low-confidence token estimate when no cost was captured. Usage-based billing started on 2026-06-01, so older pay-per-message totals are ignored; retained pre-cutover token telemetry can be estimated from local post-cutover model rate profiles or the built-in GitHub pricing fallback and shown as a historical equivalent under current usage-based rates when available. The interactive `/cost` overview labels cost since June 1, 2026 separately from earlier historical estimates, bases averages/forecasts on the actual retained coverage window, and renders a six-month calendar with blank pre-data days and dash-filled no-spend days after local data begins. These windows are local Copilot CLI session telemetry, not account-wide Copilot billing totals.
@@ -121,13 +121,13 @@ When Copilot passes the shared `~/.copilot/session-state` root to the statusline
 
 ## Extension system notes
 
-`copilot-cost` is packaged as a Copilot plugin at `plugins/copilot-cost`. The plugin bundles the native extension under `extensions/copilot-cost/` and owns the install workflow through the `ext-cost-setup` skill plus scripts in `scripts/`.
+`copilot-cost` is packaged as a Copilot plugin at `plugins/copilot-cost`. The plugin bundles the native extension under `extensions/copilot-cost/`, which Copilot CLI 1.0.62 and newer loads directly from the installed plugin.
 
-Copilot CLI discovers native extensions from project `.github/extensions/<name>/extension.mjs` and user `~/.copilot/extensions/<name>/extension.mjs` paths.
+Copilot CLI discovers native extensions from project `.github/extensions/<name>/extension.mjs`, user `~/.copilot/extensions/<name>/extension.mjs`, and installed plugin `extensions/<name>/extension.mjs` paths.
 
-The setup script installs a generated user-scoped shim at `~/.copilot/extensions/copilot-cost/extension.mjs` that imports the bundled plugin extension by absolute file URL. It refuses to overwrite unmanaged files and replaces the older symlink layout only when the symlink plausibly points at a previous `copilot-cost` install. The statusline command does not create a product-specific folder under `~/.copilot`; it calls the bundled extension entrypoint inside the installed plugin.
+The old setup skill wrote a generated user-scoped shim at `~/.copilot/extensions/copilot-cost/extension.mjs`. Current first-run startup removes that shim only when it contains the known generated marker, preventing duplicate extension instances without touching unmanaged user files. The statusline command does not create a product-specific folder under `~/.copilot`; it calls the bundled extension entrypoint inside the installed plugin.
 
-Installer metadata and runtime accounting state are written to `COPILOT_PLUGIN_DATA` when Copilot provides it, with `~/.copilot/plugin-data/copilot-extensions/copilot-cost` as the fallback. Both the native extension process and standalone statusline command use this shared plugin-data location.
+Footer setup metadata and runtime accounting state are written to `COPILOT_PLUGIN_DATA` when Copilot provides it, with `~/.copilot/plugin-data/copilot-extensions/copilot-cost` as the fallback. Both the native extension process and standalone statusline command use this shared plugin-data location.
 
 The extension API and discovery behavior are not fully documented on docs.github.com. Current behavior is based on the CLI runtime and examples, so keep the entrypoint conservative and re-check conventions when upgrading the CLI.
 
