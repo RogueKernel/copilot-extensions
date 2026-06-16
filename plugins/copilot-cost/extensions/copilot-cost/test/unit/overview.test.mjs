@@ -65,6 +65,15 @@ test("overview separates actual post-pricing cost from earlier equivalent cost",
     assert.deepEqual(stats.modelBreakdown.map((model) => [model.model, model.usd, model.share]), [
         ["gpt-test", 2.5, 1],
     ]);
+    assert.deepEqual(stats.surfaceBreakdown.map((surface) => [surface.surface, surface.sessionCount, surface.usd]), [
+        ["cli", 2, 3],
+        ["vscode", 0, 0],
+    ]);
+    assert.deepEqual(stats.diagnostics.methods.map((method) => [method.method, method.sessions, method.usd]), [
+        ["closed_ai_credits", 1, 2],
+        ["closed_tokens", 1, 1],
+        ["auto_closed_ai_credits", 0, 0],
+    ]);
 });
 
 test("overview renders a compact 180-day cost view", () => {
@@ -94,6 +103,15 @@ test("overview renders a compact 180-day cost view", () => {
                     },
                 }),
                 high: session("high", Date.UTC(2026, 5, 3, 12), 11_000_000_000_000),
+                uncosted: session("uncosted", Date.UTC(2026, 5, 4, 12), undefined, {
+                    inputTokens: 100,
+                    outputTokens: 10,
+                }, {}, {
+                    state: "open",
+                    source: "none",
+                    closedAt: undefined,
+                    lastSeenAt: Date.UTC(2026, 5, 4, 12),
+                }),
             },
         },
     };
@@ -133,28 +151,38 @@ test("overview renders a compact 180-day cost view", () => {
     assert.match(output, /Forecast 7d\s+\|\s+\$71\.91/);
     assert.match(output, /Forecast 30d\s+\|\s+\$308\.18/);
     assert.match(output, /Avg\/session\s+\|\s+\$37\.67/);
+    assert.match(output, /Surfaces\s+\|\s+CLI \$113\.00 \/ 3 sessions/);
     assert.match(output, /Models\s+\|\s+gpt-test \$11\.99 \(100%\)/);
     assert.match(output, /Cost calendar · six months · 3 visible records from 180d retention/);
-    assert.match(output, /Jun 2026 · \$112 \(~\$11\/day\).*May 2026 · \$1 \(~\$1\/day\).*Apr 2026 · \$0 \(~\$0\/day\)/);
-    assert.match(output, /Mar 2026 · \$0 \(~\$0\/day\).*Feb 2026 · \$0 \(~\$0\/day\).*Jan 2026 · \$0 \(~\$0\/day\)/);
+    assert.match(output, /Jan 2026 · \$0 \(~\$0\/day\).*Feb 2026 · \$0 \(~\$0\/day\).*Mar 2026 · \$0 \(~\$0\/day\)/);
+    assert.match(output, /Apr 2026 · \$0 \(~\$0\/day\).*May 2026 · \$1 \(~\$1\/day\).*Jun 2026 · \$112 \(~\$11\/day\)/);
     assert.doesNotMatch(output, /Dec 2025/);
     assert.match(output, /\+----\+----\+----\+----\+----\+----\+/);
-    assert.match(output, /Mo \|\$-\s+\|\$-\s+\|/);
-    assert.match(output, /Tu \|\$2\s+\|\$-\s+\|/);
-    assert.match(output, /We \|\$110\|\$-\s+\|/);
-    assert.match(output, /Su \|\$-\s+\|.*\|\$1\s+\|/);
+    assert.match(output, /Mo .*?\|\$-\s+\|\$-\s+\|/);
+    assert.match(output, /Tu .*?\|\$2\s+\|\$-\s+\|/);
+    assert.match(output, /We .*?\|\$110\|\$-\s+\|/);
+    assert.match(output, /Su .*?\|\$1\s+\|.*\|\$-\s+\|/);
     assert.doesNotMatch(output, /\|\s+\$0\|/);
     assert.doesNotMatch(output, /·{1,2} none/);
     assert.match(output, /Daily cost scale: .*outside active range.*\$-\s+= no spend after data begins/);
     assert.match(output, /Daily cost bands: .*<=\$10.*<=\$25.*<=\$50.*<=\$100.*>\$100/);
     assert.match(output, /Top days: Jun 3, 2026 \$110\.00 · Jun 2, 2026 \$2\.00 · May 31, 2026 \$1\.00/);
+    assert.match(output, /\+--\[ Diagnostics \]-+\+/);
+    assert.match(output, /Sessions found\s+\|\s+4 total \(4 CLI, 0 VS Code\)/);
+    assert.doesNotMatch(output, /Costed sessions|Uncosted sessions/);
+    assert.match(output, /Method\s+\| Sessions\s+\| Total\s+\| Confidence/);
+    assert.match(output, /Open \[Token\]\s+\|\s+1\s+\|\s+\$0\.00\s+\|\s+Est\. Low/);
+    assert.match(output, /Closed \[AI Cr\]\s+\|\s+2\s+\|\s+\$112\.00\s+\|\s+Exact/);
+    assert.match(output, /Closed \[Token\]\s+\|\s+1\s+\|\s+\$1\.00\s+\|\s+Estimate/);
+    assert.doesNotMatch(output, /No cost data/);
     assert.match(output, /Usage-based billing starts Jun 1, 2026/);
+    assert.match(output, /copilot-cost v\d+\.\d+\.\d+$/);
     assert.match(coloredOutput, /\x1b\[97m\x1b\[48;5;88m\$110\x1b\[0m/);
     assert.match(coloredOutput, /\x1b\[38;5;250m\x1b\[48;5;238m\$-\s+\x1b\[0m/);
     assert.match(coloredOutput, /\x1b\[48;5;238m\s{4}\x1b\[0m/);
-    assert.match(narrowOutput, /Jun 2026 · \$112 \(~\$11\/day\).*May 2026 · \$1 \(~\$1\/day\)/);
-    assert.match(narrowOutput, /Apr 2026 · \$0 \(~\$0\/day\).*Mar 2026 · \$0 \(~\$0\/day\)/);
-    assert.match(narrowOutput, /Feb 2026 · \$0 \(~\$0\/day\).*Jan 2026 · \$0 \(~\$0\/day\)/);
+    assert.match(narrowOutput, /Jan 2026 · \$0 \(~\$0\/day\).*Feb 2026 · \$0 \(~\$0\/day\)/);
+    assert.match(narrowOutput, /Mar 2026 · \$0 \(~\$0\/day\).*Apr 2026 · \$0 \(~\$0\/day\)/);
+    assert.match(narrowOutput, /May 2026 · \$1 \(~\$1\/day\).*Jun 2026 · \$112 \(~\$11\/day\)/);
 
     for (const line of output.split("\n")) {
         assert.ok(stripAnsi(line).length <= 140, `calendar output should stay narrow: ${line}`);
@@ -162,6 +190,75 @@ test("overview renders a compact 180-day cost view", () => {
     for (const line of narrowOutput.split("\n")) {
         assert.ok(stripAnsi(line).length <= 80, `narrow overview should fit 80 columns: ${line}`);
     }
+});
+
+test("overview analysis breaks retained cost out by session surface", () => {
+    const now = Date.UTC(2026, 5, 10, 12);
+    const output = renderCostOverview({
+        now,
+        color: false,
+        settings: { unit: "credits" },
+        ledger: {
+            sessions: {
+                cli: session("cli", Date.UTC(2026, 5, 2, 12), 200_000_000_000),
+                "vscode:root:workspace:session": session("vscode:root:workspace:session", Date.UTC(2026, 5, 3, 12), 300_000_000_000),
+            },
+        },
+    });
+
+    assert.match(output, /Surfaces\s+\|\s+CLI 200\.00cr \/ 1 session · VS Code 300\.00cr \/ 1 session/);
+});
+
+test("overview diagnostics show retained sessions by costing method and surface", () => {
+    const now = Date.UTC(2026, 5, 10, 12);
+    const output = renderCostOverview({
+        now,
+        color: false,
+        settings: { unit: "usd" },
+        ledger: {
+            sessions: {
+                shutdown: session("shutdown", Date.UTC(2026, 5, 2, 12), 100_000_000_000, {}, {
+                    "gpt-test": {
+                        totalNanoAiu: 100_000_000_000,
+                        tokenTotals: { outputTokens: 10 },
+                    },
+                }),
+                statusline: session("statusline", Date.UTC(2026, 5, 3, 12), 200_000_000_000, {}, {}, {
+                    state: "open",
+                    source: "statusline",
+                    lastSeenAt: Date.UTC(2026, 5, 3, 12),
+                }),
+                cleanEstimate: session("cleanEstimate", Date.UTC(2026, 4, 31, 12), 300_000_000_000, {
+                    outputTokens: 30,
+                }, {
+                    "gpt-test": {
+                        totalNanoAiu: 300_000_000_000,
+                        tokenTotals: { outputTokens: 30 },
+                    },
+                }),
+                dirtyEstimate: session("dirtyEstimate", Date.UTC(2026, 4, 30, 12), 400_000_000_000, {}, {}, {
+                    state: "auto_closed",
+                    source: "estimated_tokens",
+                    lastSeenAt: Date.UTC(2026, 4, 30, 12),
+                }),
+                "vscode:root:workspace:uncosted": session("vscode:root:workspace:uncosted", Date.UTC(2026, 5, 5, 12), undefined, {
+                    inputTokens: 100,
+                    outputTokens: 10,
+                }, {}, {
+                    state: "closed",
+                    source: "none",
+                }),
+            },
+        },
+    });
+
+    assert.match(output, /Sessions found\s+\|\s+5 total \(4 CLI, 1 VS Code\)/);
+    assert.doesNotMatch(output, /Costed sessions|Uncosted sessions/);
+    assert.match(output, /Closed \[AI Cr\]\s+\|\s+1\s+\|\s+\$1\.00\s+\|\s+Exact/);
+    assert.match(output, /Open \[AI Cr\]\s+\|\s+1\s+\|\s+\$2\.00\s+\|\s+Est\. High/);
+    assert.match(output, /Closed \[Token\]\s+\|\s+2\s+\|\s+\$3\.00\s+\|\s+Estimate/);
+    assert.match(output, /Stale \[Token\]\s+\|\s+1\s+\|\s+\$4\.00\s+\|\s+Est\. Low/);
+    assert.doesNotMatch(output, /No cost data/);
 });
 
 test("overview calendar shows implied thousands for high daily costs instead of capping at 999", () => {
@@ -179,13 +276,13 @@ test("overview calendar shows implied thousands for high daily costs instead of 
         },
     });
 
-    assert.match(output, /We \|£1\.2\|£-\s+\|/);
-    assert.match(output, /Th \|£9\.9\|\s+\|/);
-    assert.match(output, /Fr \|£10k\|\s+\|/);
+    assert.match(output, /We .*?\|£1\.2\|£-\s+\|/);
+    assert.match(output, /Th .*?\|£9\.9\|\s+\|/);
+    assert.match(output, /Fr .*?\|£10k\|\s+\|/);
     assert.doesNotMatch(output, /£999/);
 });
 
-function session(id, at, totalNanoAiu, tokenTotals = {}, modelMetrics = {}) {
+function session(id, at, totalNanoAiu, tokenTotals = {}, modelMetrics = {}, overrides = {}) {
     return {
         id,
         state: "closed",
@@ -194,6 +291,7 @@ function session(id, at, totalNanoAiu, tokenTotals = {}, modelMetrics = {}) {
         closedAt: at,
         tokenTotals,
         modelMetrics,
+        ...overrides,
     };
 }
 

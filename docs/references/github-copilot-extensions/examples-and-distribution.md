@@ -36,7 +36,7 @@ The `openagent` wrapper pattern is similar to `copilot-cost`'s old plugin setup 
 
 OpenAgent's installer writes a generated native wrapper rather than a symlink. The wrapper imports a built bundle elsewhere, records a fingerprint, and can re-run setup if the wrapper is stale. This remains useful historical context for pre-1.0.62 environments.
 
-The public cost-extension peer is especially relevant: it treats plugin install, native extension registration, and statusline configuration as separate setup steps. Its native registration is a generated forwarder file in `~/.copilot/extensions/`, not a directory symlink.
+The public cost-extension peer remains useful historical context for older CLI builds and migration behavior: it treats plugin install, native extension registration, and statusline configuration as separate setup steps. Current `copilot-cost` does not need that generated forwarder path because Copilot CLI can discover plugin-shipped native extensions directly.
 
 ## Distribution options for Copilot CLI native extensions
 

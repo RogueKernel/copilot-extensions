@@ -2,9 +2,7 @@
 // The @github/copilot-sdk import stays inside runExtension(); the rest of this module is a
 // testable runtime seam for command registration, event wiring, and finalizers.
 
-import { officialTotal, snapshotCompaction, snapshotTurn } from "../domain/cost.mjs";
-import { closeFromShutdown, updateSessionLedger } from "../domain/session-ledger.mjs";
-import { modelMetricsFromShutdown } from "../domain/session-jsonl.mjs";
+import { officialTotal, snapshotCompaction, snapshotStatus, snapshotTurn } from "../domain/cost.mjs";
 import { currentSessionId, syncSessionLedger } from "../domain/session-sync.mjs";
 import { collect, createTurn } from "../domain/turns.mjs";
 import { refreshUsageWindows } from "../domain/windows.mjs";
@@ -12,10 +10,15 @@ import { optNum } from "../math.mjs";
 import { renderSummary } from "../render/summary.mjs";
 import { timestampMs } from "../render/format.mjs";
 import { configure, readSettings, displays } from "../settings.mjs";
-import { runFirstRunTasks, runStartupTasks } from "../first-run.mjs";
+import { resetLedgerOnVersionChange, runFirstRunTasks, runStartupTasks } from "../first-run.mjs";
 import { mergeState, readState } from "../state.mjs";
+import { claimUsageWindowSync } from "../summary-state.mjs";
+import { installCostDebugProbe } from "./usage-debug.mjs";
+
+const WINDOW_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
 const DEFAULT_RUNTIME_DEPS = {
+    claimUsageWindowSync,
     collect,
     configure,
     createTurn,
@@ -27,15 +30,17 @@ const DEFAULT_RUNTIME_DEPS = {
     readState,
     refreshUsageWindows,
     renderSummary,
+    resetLedgerOnVersionChange,
     runFirstRunTasks,
     syncSessionLedger,
+    windowSyncIntervalMs: WINDOW_SYNC_INTERVAL_MS,
     currentSessionId,
-    closeFromShutdown,
     officialTotal,
     snapshotCompaction,
+    snapshotStatus,
     snapshotTurn,
     timestampMs,
-    updateSessionLedger,
+    installCostDebugProbe,
 };
 
 // Joins the Copilot CLI session and wires usage events to cost-state patches.
@@ -66,11 +71,12 @@ export function createSessionRuntime(overrides = {}) {
         joinOptions: () => ({ tools: [], commands }),
         attach(nextSession) {
             session = nextSession;
-            if (deps.runStartupTasks) {
-                void deps.runStartupTasks();
-            }
+            const startupReady = Promise.resolve(deps.runStartupTasks
+                ? deps.runStartupTasks()
+                : deps.resetLedgerOnVersionChange?.());
             wireSessionEvents(session, {
                 deps,
+                startupReady,
                 getTurn: () => turn,
                 setTurn: (nextTurn) => {
                     turn = nextTurn;
@@ -80,7 +86,8 @@ export function createSessionRuntime(overrides = {}) {
                     contextWindow = nextContextWindow;
                 },
             });
-            void syncCurrentSessionLedger(session, deps);
+            deps.installCostDebugProbe?.(session);
+            void startupReady.finally(() => syncCurrentSessionLedger(session, deps)).catch(() => {});
             return session;
         },
     };
@@ -96,7 +103,6 @@ function wireSessionEvents(session, runtime) {
         deps,
     );
     const finalizeCurrentCompaction = (event) => void finalizeCompaction(session, event.data, deps);
-    const finalizeCurrentShutdown = (event) => void finalizeShutdown(session, event, deps);
 
     session.on("user.message", (event) => {
         if (isAgentEvent(event)) {
@@ -108,7 +114,7 @@ function wireSessionEvents(session, runtime) {
             runtime.setTurn(turn);
         }
         turn.startedAt ??= deps.timestampMs(event.timestamp) ?? deps.now();
-        void rememberOfficialStart(session, turn, deps);
+        rememberOfficialStart(session, turn, deps, runtime.startupReady);
     });
 
     session.on("assistant.turn_start", (event) => {
@@ -122,7 +128,7 @@ function wireSessionEvents(session, runtime) {
         }
         turn.startedAt ??= deps.timestampMs(event.timestamp) ?? deps.now();
         turn.turnId ??= event.data?.turnId;
-        void rememberOfficialStart(session, turn, deps);
+        rememberOfficialStart(session, turn, deps, runtime.startupReady);
     });
 
     session.on("assistant.usage", (event) => {
@@ -130,7 +136,7 @@ function wireSessionEvents(session, runtime) {
         if (turn.done) {
             turn = deps.createTurn();
             runtime.setTurn(turn);
-            void rememberOfficialStart(session, turn, deps);
+            rememberOfficialStart(session, turn, deps, runtime.startupReady);
         }
         deps.collect(turn, event);
     });
@@ -139,12 +145,13 @@ function wireSessionEvents(session, runtime) {
         if (isAgentEvent(event)) {
             return;
         }
-        runtime.setContextWindow(nextContextWindow(runtime.getContextWindow(), event, deps.optNum));
+        const contextWindow = nextContextWindow(runtime.getContextWindow(), event, deps.optNum);
+        runtime.setContextWindow(contextWindow);
+        void runtime.startupReady.then(() => refreshOfficialUsageMetrics(session, deps, contextPatch(contextWindow)));
     });
 
-    session.on("session.idle", finalizeCurrentTurn);
-    session.on("session.compaction_complete", finalizeCurrentCompaction);
-    session.on("session.shutdown", finalizeCurrentShutdown);
+    session.on("session.idle", (event) => void runtime.startupReady.then(() => finalizeCurrentTurn(event)));
+    session.on("session.compaction_complete", (event) => void runtime.startupReady.then(() => finalizeCurrentCompaction(event)));
 }
 
 // Persists one completed turn and logs the after-message summary when enabled.
@@ -158,14 +165,15 @@ export async function finalizeTurn(session, turn, contextWindow, completionEvent
     await resolveOfficialStart(turn);
     const priorState = await deps.readState(session.workspacePath);
     const patch = deps.snapshotTurn(turn, priorState, contextWindow);
-    const state = await deps.mergeState(session.workspacePath, patch);
+    let state = await deps.mergeState(session.workspacePath, patch);
+    state = await refreshOfficialUsageMetrics(session, deps) ?? state;
+    await syncCurrentSessionLedgerIfWindowsStale(session, deps);
     const settings = await deps.readSettings();
     if (deps.displays(settings.mode, "message")) {
         const windows = await deps.refreshUsageWindows();
         await session.log(renderMessageSummary(state, windows, settings, deps));
     }
     await deps.runFirstRunTasks({ workspacePath: session.workspacePath, priorState });
-    void syncCurrentSessionLedger(session, deps);
     return state;
 }
 
@@ -186,29 +194,32 @@ export async function finalizeCompaction(session, compaction, overrides = {}) {
 
     const priorState = await deps.readState(session.workspacePath);
     const patch = deps.snapshotCompaction(compaction, priorState);
-    const state = await deps.mergeState(session.workspacePath, patch);
+    let state = await deps.mergeState(session.workspacePath, patch);
+    state = await refreshOfficialUsageMetrics(session, deps) ?? state;
+    await syncCurrentSessionLedgerIfWindowsStale(session, deps);
     await deps.runFirstRunTasks({ workspacePath: session.workspacePath, priorState });
     return state;
 }
 
-// Best-effort shutdown closure; startup scans/statusline live totals remain the durable fallback.
-export async function finalizeShutdown(session, event, overrides = {}) {
-    const deps = { ...DEFAULT_RUNTIME_DEPS, ...overrides };
+export async function syncCurrentSessionLedgerIfWindowsStale(session, deps = DEFAULT_RUNTIME_DEPS) {
     const id = deps.currentSessionId(session);
     if (!id) {
-        return undefined;
+        return false;
     }
-
-    const data = event?.data ?? {};
-    const at = deps.timestampMs(event?.timestamp) ?? deps.now();
-    const ledger = await deps.updateSessionLedger((prior) => deps.closeFromShutdown(prior, {
-        id,
-        totalNanoAiu: deps.optNum(data.totalNanoAiu),
-        modelNanoAiu: modelNanoAiu(data.modelMetrics, deps.optNum),
-        modelMetrics: modelMetricsFromShutdown(data.modelMetrics),
-        at,
-    }));
-    return ledger.sessions[id];
+    const now = deps.now();
+    try {
+        const claimed = await deps.claimUsageWindowSync({
+            now,
+            staleAfterMs: deps.windowSyncIntervalMs,
+        });
+        if (!claimed) {
+            return false;
+        }
+        await deps.syncSessionLedger({ currentSessionId: id, now });
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 // Merges new context-window sizes over the prior ones, preserving known values.
@@ -228,13 +239,51 @@ function renderMessageSummary(state, windows, settings, deps) {
     return deps.renderSummary({ ...state, ...windows }, summaryOptions);
 }
 
-function rememberOfficialStart(session, turn, deps) {
+async function refreshOfficialUsageMetrics(session, deps, extraPatch = {}) {
+    const getMetrics = session?.rpc?.usage?.getMetrics;
+    const id = deps.currentSessionId(session);
+    const sessionPatch = id ? { sessionId: id, ...extraPatch } : extraPatch;
+    if (typeof getMetrics !== "function") {
+        return hasPatchValues(sessionPatch) ? deps.mergeState(session.workspacePath, sessionPatch) : undefined;
+    }
+    if (!id) {
+        return hasPatchValues(extraPatch) ? deps.mergeState(session.workspacePath, extraPatch) : undefined;
+    }
+
+    try {
+        const metrics = await getMetrics.call(session.rpc.usage);
+        const totalNanoAiu = deps.optNum(metrics?.totalNanoAiu);
+        if (totalNanoAiu === undefined) {
+            return hasPatchValues(sessionPatch) ? deps.mergeState(session.workspacePath, sessionPatch) : undefined;
+        }
+        const priorState = await deps.readState(session.workspacePath);
+        return deps.mergeState(session.workspacePath, {
+            ...deps.snapshotStatus({ ai_used: { total_nano_aiu: totalNanoAiu } }, priorState),
+            ...sessionPatch,
+        });
+    } catch {
+        return hasPatchValues(sessionPatch) ? deps.mergeState(session.workspacePath, sessionPatch) : undefined;
+    }
+}
+
+function contextPatch(contextWindow = {}) {
+    return {
+        contextTokens: contextWindow.currentTokens,
+        contextTokenLimit: contextWindow.tokenLimit,
+    };
+}
+
+function hasPatchValues(patch = {}) {
+    return Object.values(patch).some((value) => value !== undefined);
+}
+
+function rememberOfficialStart(session, turn, deps, startupReady = Promise.resolve()) {
     if (turn.officialStartedUsd !== undefined || turn.officialStartPromise) {
         return;
     }
     // Paired with snapshotTurn(): prevents counting usage that became official
     // while this turn was in flight as both official and pending.
-    turn.officialStartPromise = deps.readState(session.workspacePath).then((state) => {
+    turn.officialStartPromise = Promise.resolve(startupReady).then(() => deps.readState(session.workspacePath)).then((state) => {
         turn.officialStartedUsd = deps.officialTotal(state);
     }, (error) => {
         turn.officialStartError = error;
@@ -254,15 +303,4 @@ async function resolveOfficialStart(turn) {
 // Sub-agent events carry an agentId; the main session's own turns do not.
 function isAgentEvent(event) {
     return Boolean(event?.agentId);
-}
-
-function modelNanoAiu(modelMetrics = {}, optNumFn) {
-    if (!modelMetrics || typeof modelMetrics !== "object") {
-        return undefined;
-    }
-    const total = Object.values(modelMetrics)
-        .map((metrics) => optNumFn(metrics?.totalNanoAiu))
-        .filter((value) => value !== undefined)
-        .reduce((sum, value) => sum + value, 0);
-    return total > 0 ? total : undefined;
 }

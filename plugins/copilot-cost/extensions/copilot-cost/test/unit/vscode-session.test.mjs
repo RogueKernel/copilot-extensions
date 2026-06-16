@@ -9,6 +9,7 @@ import {
     discoverVsCodeTelemetryFiles,
     parseVsCodeTelemetryGroups,
 } from "../../src/domain/vscode-session.mjs";
+import { SURFACE_VSCODE } from "../../src/domain/session-ledger.mjs";
 
 test("parses VS Code delta chat JSONL credits and tokens without retaining content", async () => {
     const root = await tempUserRoot();
@@ -60,6 +61,7 @@ test("parses VS Code delta chat JSONL credits and tokens without retaining conte
     assert.equal(summaries.length, 1);
     const [summary] = summaries;
     assert.match(summary.id, /^vscode:/);
+    assert.equal(summary.surface, SURFACE_VSCODE);
     assert.equal(summary.firstSeenAt, Date.UTC(2026, 5, 10, 10));
     assert.equal(summary.lastSeenAt, Date.UTC(2026, 5, 10, 10));
     assert.equal(summary.usageNanoAiu, 2_400_000_000);

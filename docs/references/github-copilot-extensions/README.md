@@ -1,6 +1,6 @@
 # GitHub Copilot CLI native extensions
 
-This folder is a working reference for **native GitHub Copilot CLI extensions**: local `.mjs` extensions discovered from `.github/extensions/` or `~/.copilot/extensions/`.
+This folder is a working reference for **native GitHub Copilot CLI extensions**: local `.mjs` extensions discovered from `.github/extensions/`, `~/.copilot/extensions/`, or installed plugin `extensions/<name>/extension.mjs` directories.
 
 Version-specific claims in this folder are snapshots from the verification environment named in each file. Copilot CLI 1.0.62 added plugin-shipped native extensions; re-run local verification before treating older 1.0.60/1.0.61 observations as current compatibility guarantees.
 

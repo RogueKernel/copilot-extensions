@@ -2,9 +2,19 @@
 // compact activity grid backed by the local session ledger.
 
 import { BILLING, HISTORY, STYLE } from "../config.mjs";
-import { ledgerUsageEvents } from "../domain/session-ledger.mjs";
+import {
+    ledgerUsageEvents,
+    normalizeLedger,
+    SOURCE_ESTIMATED_TOKENS,
+    SURFACE_CLI,
+    SURFACE_VSCODE,
+} from "../domain/session-ledger.mjs";
 import { num, optNum } from "../math.mjs";
 import { formatAmount, formatTokenCount, paint } from "./format.mjs";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { version: PLUGIN_VERSION } = require("../../package.json");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -25,6 +35,7 @@ export function renderCostOverview({
     now = Date.now(),
     color = true,
     columns = terminalColumns(),
+    pluginVersion = PLUGIN_VERSION,
 } = {}) {
     const unit = settings.unit;
     const stats = overviewStats({ ledger, state, now });
@@ -36,8 +47,12 @@ export function renderCostOverview({
         "",
         renderActivity(stats, unit, color, width),
         "",
+        renderDiagnostics(stats, unit, color),
+        "",
         "Usage-based billing starts Jun 1, 2026.",
         "Earlier retained telemetry uses current usage-based rates when available.",
+        "",
+        `copilot-cost v${pluginVersion}`,
     ].filter((line) => line !== null).join("\n");
 }
 
@@ -82,6 +97,8 @@ export function overviewStats({ ledger = {}, state = {}, now = Date.now() } = {}
         peakDayAt: peak.at,
         tokens,
         modelBreakdown: modelBreakdown(ledger, activeSessionIds),
+        surfaceBreakdown: surfaceBreakdown(ledger, events),
+        diagnostics: diagnosticStats(ledger, now),
     };
 }
 
@@ -106,6 +123,7 @@ function renderTopStats(stats, unit, color, width) {
         ["Forecast 7d", formatAmount(stats.forecast7dUsd, unit), STYLE.cacheWarning],
         ["Forecast 30d", formatAmount(stats.forecast30dUsd, unit), STYLE.cacheWarning],
         ["Avg/session", stats.avgSessionUsd === undefined ? "n/a" : formatAmount(stats.avgSessionUsd, unit), STYLE.next],
+        ["Surfaces", surfaceSummary(stats.surfaceBreakdown, unit, color), STYLE.context],
         ["Models", modelSummary(stats.modelBreakdown, unit, color, compact ? 1 : 3), STYLE.total],
     ], color);
 
@@ -132,7 +150,7 @@ function tokenSummary(stats) {
 function renderActivity(stats, unit, color, width) {
     const months = activityMonths(stats.buckets, stats.now, stats.earliestDataAt);
     const monthsPerRow = width < 104 ? 2 : 3;
-    const visibleStart = months.at(-1)?.at ?? startOfUtcMonth(stats.now);
+    const visibleStart = months[0]?.at ?? startOfUtcMonth(stats.now);
     const visibleEnd = startOfUtcDay(stats.now) + DAY_MS;
     const visibleRecords = stats.events.filter((event) => event.at >= visibleStart && event.at < visibleEnd).length;
     const topDays = stats.buckets.filter((bucket) => bucket.usd > 0)
@@ -143,6 +161,19 @@ function renderActivity(stats, unit, color, width) {
         ...monthRows(months, unit, color, monthsPerRow),
         ...costLegend(unit, color, width),
         topDays.length ? `Top days: ${topDays.map((bucket) => dayCost(bucket, unit, color)).join(" · ")}` : "Top days: no retained cost records",
+    ].join("\n");
+}
+
+function renderDiagnostics(stats, unit, color) {
+    const diagnostics = stats.diagnostics;
+    return [
+        ...sectionBlock("Diagnostics", [
+            ...statTable([
+                ["Sessions found", `${diagnostics.totalSessions} total (${diagnostics.cliSessions} CLI, ${diagnostics.vscodeSessions} VS Code)`, STYLE.context],
+            ], color),
+            "",
+            ...diagnosticRows(diagnostics.methods, unit, color),
+        ], color),
     ].join("\n");
 }
 
@@ -211,7 +242,7 @@ function dailyBuckets(events, now, days) {
 function activityMonths(buckets, now, earliestDataAt) {
     const byDay = new Map(buckets.map((bucket) => [bucket.at, bucket]));
     const currentMonth = startOfUtcMonth(now);
-    return Array.from({ length: 6 }, (_, index) => monthBlock(addUtcMonths(currentMonth, -index), byDay, earliestDataAt, now));
+    return Array.from({ length: 6 }, (_, index) => monthBlock(addUtcMonths(currentMonth, index - 5), byDay, earliestDataAt, now));
 }
 
 function monthBlock(monthAt, byDay, earliestDataAt, now) {
@@ -564,6 +595,209 @@ function modelBreakdown(ledger, ids) {
         .slice(0, 3);
 }
 
+function surfaceBreakdown(ledger, events) {
+    const totals = new Map([
+        [SURFACE_CLI, { surface: SURFACE_CLI, sessions: new Set(), usd: 0 }],
+        [SURFACE_VSCODE, { surface: SURFACE_VSCODE, sessions: new Set(), usd: 0 }],
+    ]);
+    for (const event of events) {
+        const surface = sessionSurface(ledger?.sessions?.[event.id], event.id);
+        const entry = totals.get(surface) ?? { surface, sessions: new Set(), usd: 0 };
+        entry.sessions.add(event.id);
+        entry.usd += num(event.usd);
+        totals.set(surface, entry);
+    }
+    return Array.from(totals.values()).map((entry) => ({
+        surface: entry.surface,
+        sessionCount: entry.sessions.size,
+        usd: entry.usd,
+    }));
+}
+
+function sessionSurface(session, id) {
+    if (session?.surface === SURFACE_VSCODE || id?.startsWith(`${SURFACE_VSCODE}:`)) {
+        return SURFACE_VSCODE;
+    }
+    return SURFACE_CLI;
+}
+
+function surfaceSummary(surfaces, unit, color) {
+    const labels = {
+        [SURFACE_CLI]: "CLI",
+        [SURFACE_VSCODE]: "VS Code",
+    };
+    return surfaces
+        .filter((surface) => surface.sessionCount > 0 || surface.usd > 0)
+        .map((surface) => `${labels[surface.surface] ?? surface.surface} ${paint(formatAmount(surface.usd, unit), STYLE.context, color)} / ${surface.sessionCount} ${plural(surface.sessionCount, "session")}`)
+        .join(" · ") || "no retained cost data";
+}
+
+function diagnosticStats(ledger, now) {
+    const normalized = normalizeLedger(ledger);
+    const eventsBySession = new Map(ledgerUsageEvents(normalized, now, { includePreCredit: true }).map((event) => [event.id, event]));
+    const sessions = Object.values(normalized.sessions).filter((session) => inRetainedWindow(session, now));
+    const methods = new Map(DIAGNOSTIC_METHOD_ORDER.map((method) => [method, {
+        method,
+        sessions: 0,
+        usd: 0,
+    }]));
+
+    let cliSessions = 0;
+    let vscodeSessions = 0;
+
+    for (const session of sessions) {
+        const event = eventsBySession.get(session.id);
+        const method = diagnosticMethod(session, event);
+        const entry = methods.get(method) ?? { method, sessions: 0, usd: 0 };
+        const usd = diagnosticUsd(session, event);
+        entry.sessions += 1;
+        entry.usd += usd;
+        methods.set(method, entry);
+
+        if (sessionSurface(session, session.id) === SURFACE_VSCODE) {
+            vscodeSessions += 1;
+        } else {
+            cliSessions += 1;
+        }
+    }
+
+    return {
+        totalSessions: sessions.length,
+        cliSessions,
+        vscodeSessions,
+        methods: Array.from(methods.values()).filter((method) => method.sessions > 0 || ALWAYS_SHOW_DIAGNOSTIC_METHODS.has(method.method)),
+    };
+}
+
+const METHOD_CLOSED_AI_CREDITS = "closed_ai_credits";
+const METHOD_OPEN_AI_CREDITS = "open_ai_credits";
+const METHOD_AUTO_CLOSED_AI_CREDITS = "auto_closed_ai_credits";
+const METHOD_CLOSED_TOKENS = "closed_tokens";
+const METHOD_OPEN_TOKENS = "open_tokens";
+const METHOD_AUTO_CLOSED_TOKENS = "auto_closed_tokens";
+
+const DIAGNOSTIC_METHOD_ORDER = [
+    METHOD_OPEN_AI_CREDITS,
+    METHOD_OPEN_TOKENS,
+    METHOD_CLOSED_AI_CREDITS,
+    METHOD_CLOSED_TOKENS,
+    METHOD_AUTO_CLOSED_AI_CREDITS,
+    METHOD_AUTO_CLOSED_TOKENS,
+];
+
+const ALWAYS_SHOW_DIAGNOSTIC_METHODS = new Set([
+    METHOD_AUTO_CLOSED_AI_CREDITS,
+]);
+
+const DIAGNOSTIC_METHOD_LABELS = {
+    [METHOD_CLOSED_AI_CREDITS]: ["Closed [AI Cr]", "Exact"],
+    [METHOD_OPEN_AI_CREDITS]: ["Open [AI Cr]", "Est. High"],
+    [METHOD_AUTO_CLOSED_AI_CREDITS]: ["Stale [AI Cr]", "Est. High"],
+    [METHOD_CLOSED_TOKENS]: ["Closed [Token]", "Estimate"],
+    [METHOD_OPEN_TOKENS]: ["Open [Token]", "Est. Low"],
+    [METHOD_AUTO_CLOSED_TOKENS]: ["Stale [Token]", "Est. Low"],
+};
+
+function diagnosticRows(methods, unit, color) {
+    if (!methods.length) {
+        return ["  No retained session records yet."];
+    }
+    return gridTable(methods.map((method) => {
+        const [label, confidence] = DIAGNOSTIC_METHOD_LABELS[method.method] ?? [method.method, "unknown"];
+        return [
+            label,
+            method.sessions,
+            formatAmount(method.usd, unit),
+            confidence,
+            STYLE.context,
+        ];
+    }), {
+        columns: 1,
+        headers: ["Method", "Sessions", "Total", "Confidence"],
+        styles: [STYLE.label, undefined, undefined, undefined],
+        color,
+    });
+}
+
+function diagnosticMethod(session, event) {
+    if (session.state === "auto_closed") {
+        return session.source !== SOURCE_ESTIMATED_TOKENS && hasObservedAiCreditTotal(session)
+            ? METHOD_AUTO_CLOSED_AI_CREDITS
+            : METHOD_AUTO_CLOSED_TOKENS;
+    }
+
+    const hasCost = num(event?.usd) > 0;
+    if (!hasCost) {
+        if (session.state === "open") {
+            return hasObservedAiCreditTotal(session) || !hasSessionActivity(session) ? METHOD_OPEN_AI_CREDITS : METHOD_OPEN_TOKENS;
+        }
+        return hasSessionActivity(session) ? METHOD_CLOSED_TOKENS : METHOD_CLOSED_AI_CREDITS;
+    }
+    if (session.source === SOURCE_ESTIMATED_TOKENS || isPreCreditSession(session) || !hasObservedAiCreditTotal(session)) {
+        return sessionStateMethod(session, {
+            closed: METHOD_CLOSED_TOKENS,
+            open: METHOD_OPEN_TOKENS,
+            autoClosed: METHOD_AUTO_CLOSED_TOKENS,
+        });
+    }
+    return sessionStateMethod(session, {
+        closed: METHOD_CLOSED_AI_CREDITS,
+        open: METHOD_OPEN_AI_CREDITS,
+        autoClosed: METHOD_AUTO_CLOSED_AI_CREDITS,
+    });
+}
+
+function diagnosticUsd(session, event) {
+    return num(event?.usd);
+}
+
+function inRetainedWindow(session, now) {
+    const at = bucketTimestamp(session);
+    return at === undefined || (at >= now - HISTORY.retentionDays * DAY_MS && at <= now);
+}
+
+function bucketTimestamp(session) {
+    return optNum(session.windowAt)
+        ?? optNum(session.closedAt)
+        ?? optNum(session.lastSeenAt)
+        ?? optNum(session.lastUpdatedAt);
+}
+
+function isPreCreditSession(session) {
+    const at = bucketTimestamp(session);
+    return at !== undefined && at < HISTORY.moneyPricingStartedAt;
+}
+
+function hasObservedAiCreditTotal(session) {
+    return optNum(session.totalNanoAiu) > 0 || sumModelMetricNanoAiu(session.modelMetrics) > 0;
+}
+
+function sumModelMetricNanoAiu(modelMetrics = {}) {
+    return Object.values(modelMetrics).reduce((total, metrics) => total + num(metrics?.totalNanoAiu), 0);
+}
+
+function hasSessionActivity(session) {
+    return totalTokens(session.tokenTotals) > 0
+        || Object.keys(session.modelMetrics ?? {}).length > 0
+        || optNum(session.usageNanoAiu) > 0
+        || optNum(session.compactionNanoAiu) > 0
+        || optNum(session.modelNanoAiu) > 0;
+}
+
+function sessionStateMethod(session, methods) {
+    if (session.state === "closed" || isRoutineShutdown(session)) {
+        return methods.closed;
+    }
+    if (session.state === "auto_closed") {
+        return methods.autoClosed;
+    }
+    return methods.open;
+}
+
+function isRoutineShutdown(session) {
+    return session.shutdownType === "routine";
+}
+
 function modelSummary(models, unit, color, maxModels = 3) {
     if (!models.length) {
         return "not enough local model detail yet";
@@ -574,6 +808,10 @@ function modelSummary(models, unit, color, maxModels = 3) {
         .join(" · ");
     const hidden = models.length - visible.length;
     return hidden > 0 ? `${summary} +${hidden} more` : summary;
+}
+
+function plural(count, singular) {
+    return count === 1 ? singular : `${singular}s`;
 }
 
 function mergeTokens(target, source = {}) {

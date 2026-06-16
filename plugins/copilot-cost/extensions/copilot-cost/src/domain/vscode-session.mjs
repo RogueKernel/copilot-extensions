@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 
 import { BILLING } from "../config.mjs";
 import { optNum } from "../math.mjs";
+import { SURFACE_VSCODE } from "./session-ledger.mjs";
 
 const VSCODE_VARIANTS = ["Code", "Code - Insiders", "Code - Exploration", "VSCodium", "Cursor"];
 const COPILOT_EXTENSION_DIRS = ["GitHub.copilot-chat", "github.copilot-chat", "GitHub.copilot", "github.copilot"];
@@ -372,6 +373,7 @@ function mergeFileMeta(group, file) {
 function groupSummary(group) {
     const summary = {
         id: group.id,
+        surface: SURFACE_VSCODE,
         firstSeenAt: undefined,
         lastSeenAt: undefined,
         usageNanoAiu: undefined,

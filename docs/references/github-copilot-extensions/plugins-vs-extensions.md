@@ -32,6 +32,7 @@ Native extensions are discovered from:
 
 - `.github/extensions/<name>/extension.mjs`
 - `~/.copilot/extensions/<name>/extension.mjs`
+- installed plugin `extensions/<name>/extension.mjs` directories on Copilot CLI 1.0.62 and newer
 
 They use `@github/copilot-sdk/extension` and run as child processes attached to the current CLI session.
 

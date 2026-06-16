@@ -1,11 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 
-import { sessionLedgerPath } from "../../src/storage.mjs";
+import { summaryStatePath } from "../../src/storage.mjs";
 import { mergeState, readState, stateKey, workspacePath } from "../../src/state.mjs";
 
 test("state key is derived from the workspace path", async () => {
@@ -29,7 +28,7 @@ test("readState returns undefined when no workspace or state file exists", async
 test("mergeState applies patches and persists current state", async () => {
     await withCopilotHome(async () => {
         const workspace = await mkdtemp(join(tmpdir(), "copilot-cost-state-"));
-        await writeLedger({ [stateKey(workspace)]: { totalUsd: 1, pendingUsd: 0.25 } });
+        await writeSummaryState({ [stateKey(workspace)]: { totalUsd: 1, pendingUsd: 0.25 } });
 
         const state = await mergeState(workspace, { pendingUsd: 0, lastUsd: 0.02, window24hUsd: 1 });
 
@@ -41,7 +40,7 @@ test("mergeState applies patches and persists current state", async () => {
 test("mergeState deletes null patch values", async () => {
     await withCopilotHome(async () => {
         const workspace = await mkdtemp(join(tmpdir(), "copilot-cost-state-"));
-        await writeLedger({ [stateKey(workspace)]: { totalUsd: 1, pendingUsd: 0.25 } });
+        await writeSummaryState({ [stateKey(workspace)]: { totalUsd: 1, pendingUsd: 0.25 } });
 
         const state = await mergeState(workspace, { pendingUsd: null, lastUsd: 0.02 });
 
@@ -68,9 +67,9 @@ async function withCopilotHome(callback) {
     }
 }
 
-async function writeLedger(runtime) {
-    await mkdir(dirname(sessionLedgerPath()), { recursive: true });
-    await writeFile(sessionLedgerPath(), JSON.stringify({ version: 1, sessions: {}, runtime }));
+async function writeSummaryState(runtime) {
+    await mkdir(dirname(summaryStatePath()), { recursive: true });
+    await writeFile(summaryStatePath(), JSON.stringify({ version: 1, runtime }));
 }
 
 test("workspacePath normalizes statusline workspace variants", () => {

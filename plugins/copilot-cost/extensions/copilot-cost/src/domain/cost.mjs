@@ -1,9 +1,9 @@
 // Converts Copilot usage payloads into persisted cost state and next-turn estimates.
 // Official-vs-pending reconciliation is intentional: local assistant.usage can
-// miss some host/tool-side work, so statusline ai_used.total_nano_aiu must
-// reconcile Total and rolling deltas instead of being displayed as Sess-only
-// data. Sub-agent lifecycle events are filtered for timing/context, while usage
-// events are still accumulated when emitted.
+// miss some host/tool-side work, so official cumulative usage must reconcile
+// Total instead of being displayed as Sess-only data. Sub-agent lifecycle events
+// are filtered for timing/context, while usage events are still accumulated when
+// emitted.
 
 import { BILLING } from "../config.mjs";
 import { num, optNum, pct } from "../math.mjs";
@@ -41,7 +41,7 @@ export function snapshotTurn(turn, priorState = {}, contextWindow = {}) {
     });
 }
 
-// Reconciles the durable state with the statusline's official cumulative total.
+// Reconciles the durable state with Copilot's official cumulative total.
 export function snapshotStatus(status, priorState = {}) {
     const prior = new CostState(priorState);
     const reportedUsd = official(status);
@@ -105,7 +105,7 @@ export function officialTotal(state = {}) {
     return new CostState(state).accepted;
 }
 
-// Returns the newly observed official usage amount from a statusline payload.
+// Returns the newly observed official usage amount from an official usage payload.
 export function officialUsageDelta(status, priorState = {}) {
     const reportedUsd = official(status);
     if (reportedUsd === undefined) {
@@ -190,7 +190,7 @@ function reconcileOfficial(state, reportedUsd) {
     return { carryUsd: carry, currentUsd: reportedUsd, deltaUsd: reportedUsd - current, reset: false };
 }
 
-// Converts the statusline's cumulative official AIU into USD, if present.
+// Converts cumulative official AIU into USD, if present.
 function official(status = {}) {
     const nanoAiu = optNum(status.ai_used?.total_nano_aiu);
     return nanoAiu === undefined ? undefined : toUsd(nanoAiu);
@@ -236,7 +236,8 @@ function contextLimit(contextWindow = {}) {
 // Captures the uncached input and output tokens of one turn for trend estimates.
 function workSample(turn) {
     return {
-        inputTokens: Math.max(0, num(turn.input) - num(turn.cacheRead)),
+        inputTokens: Math.max(0, num(turn.input) - num(turn.cacheRead) - num(turn.cacheWrite)),
+        cacheWriteTokens: num(turn.pricedCacheWrite),
         outputTokens: num(turn.output),
     };
 }
@@ -273,6 +274,7 @@ function averageSample(samples) {
 
     return {
         inputTokens: values.reduce((sum, item) => sum + item.inputTokens, 0) / values.length,
+        cacheWriteTokens: values.reduce((sum, item) => sum + num(item.cacheWriteTokens), 0) / values.length,
         outputTokens: values.reduce((sum, item) => sum + item.outputTokens, 0) / values.length,
     };
 }
@@ -290,7 +292,9 @@ function blend(cachedRate, inputRate) {
 // Estimated USD for the average new (uncached) work added by the next turn.
 function averageNewWorkUsd(cost = {}) {
     const work = averageSample(cost.newWorkSamples);
-    return toUsd(work.inputTokens * num(cost.inputNanoPerToken)) + toUsd(work.outputTokens * num(cost.outputNanoPerToken));
+    return toUsd(work.inputTokens * num(cost.inputNanoPerToken))
+        + toUsd(work.cacheWriteTokens * num(cost.cacheWriteNanoPerToken))
+        + toUsd(work.outputTokens * num(cost.outputNanoPerToken));
 }
 
 // Drops absent keys so a patch never overwrites known state with undefined.

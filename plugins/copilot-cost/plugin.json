@@ -1,7 +1,7 @@
 {
   "name": "copilot-cost",
   "description": "Show Copilot CLI message, conversation, cumulative session, context, cache, and rolling usage metrics.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": {
     "name": "RogueKernel",
     "url": "https://github.com/RogueKernel"

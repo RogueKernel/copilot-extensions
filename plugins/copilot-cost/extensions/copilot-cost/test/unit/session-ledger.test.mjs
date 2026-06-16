@@ -6,17 +6,22 @@ import {
     autoCloseStaleSessions,
     ledgerUsageEvents,
     markOpen,
-    mergeLiveStatusline,
     mergeSession,
     nanoAiuToUsd,
+    normalizeLedger,
+    pruneLedger,
     sessionLedgerWindows,
+    SOURCE_COMPACTION,
     SOURCE_ESTIMATED_TOKENS,
+    SOURCE_RUNTIME,
     SOURCE_STATUSLINE,
     SOURCE_SHUTDOWN,
     SOURCE_USAGE_EVENTS,
     STATE_AUTO_CLOSED,
     STATE_CLOSED,
     STATE_OPEN,
+    SURFACE_CLI,
+    SURFACE_VSCODE,
 } from "../../src/domain/session-ledger.mjs";
 
 const day = 24 * 60 * 60 * 1000;
@@ -38,25 +43,37 @@ function estimateSingleStaleModelSession(model, tokenTotals, now = Date.UTC(2026
     return ledger.sessions.stale;
 }
 
-test("live statusline marks sessions open and keeps last updated when cost changes", () => {
-    let ledger = mergeLiveStatusline({}, { id: "abc", totalNanoAiu: 1_000_000_000, at: 100 });
-    ledger = mergeLiveStatusline(ledger, { id: "abc", totalNanoAiu: 1_000_000_000, at: 200 });
+test("normalizing the ledger backfills session surfaces from ids", () => {
+    const ledger = normalizeLedger({
+        sessions: {
+            "cli-session": { id: "cli-session", state: STATE_OPEN, source: "none" },
+            "vscode:root:workspace:session": { id: "vscode:root:workspace:session", state: STATE_OPEN, source: "none" },
+        },
+    });
 
-    assert.equal(ledger.sessions.abc.state, STATE_OPEN);
-    assert.equal(ledger.sessions.abc.totalNanoAiu, 1_000_000_000);
-    assert.equal(ledger.sessions.abc.source, SOURCE_STATUSLINE);
-    assert.equal(ledger.sessions.abc.lastSeenAt, 200);
-    assert.equal(ledger.sessions.abc.lastUpdatedAt, 100);
-
-    ledger = mergeLiveStatusline(ledger, { id: "abc", totalNanoAiu: 2_000_000_000, at: 300 });
-    assert.equal(ledger.sessions.abc.totalNanoAiu, 2_000_000_000);
-    assert.equal(ledger.sessions.abc.lastUpdatedAt, 300);
+    assert.equal(ledger.sessions["cli-session"].surface, SURFACE_CLI);
+    assert.equal(ledger.sessions["vscode:root:workspace:session"].surface, SURFACE_VSCODE);
 });
 
-test("shutdown totals close sessions and beat stale statusline values", () => {
-    let ledger = mergeLiveStatusline({}, { id: "abc", totalNanoAiu: 1_000_000_000, at: 100 });
+test("shutdown totals close sessions and beat legacy statusline ledger values", () => {
+    let ledger = mergeSession({}, {
+        id: "abc",
+        state: STATE_OPEN,
+        surface: SURFACE_CLI,
+        totalNanoAiu: 1_000_000_000,
+        source: SOURCE_STATUSLINE,
+        firstSeenAt: 100,
+        lastSeenAt: 100,
+    }, 100);
     ledger = closeFromShutdown(ledger, { id: "abc", totalNanoAiu: 3_000_000_000, at: 200 });
-    ledger = mergeLiveStatusline(ledger, { id: "abc", totalNanoAiu: 2_000_000_000, at: 300 });
+    ledger = mergeSession(ledger, {
+        id: "abc",
+        state: STATE_OPEN,
+        surface: SURFACE_CLI,
+        totalNanoAiu: 2_000_000_000,
+        source: SOURCE_STATUSLINE,
+        lastSeenAt: 300,
+    }, 300);
 
     assert.equal(ledger.sessions.abc.state, STATE_CLOSED);
     assert.equal(ledger.sessions.abc.source, SOURCE_SHUTDOWN);
@@ -83,6 +100,28 @@ test("auto-closing stale open sessions preserves existing live total", () => {
     assert.equal(ledger.sessions.stale.totalNanoAiu, 5_000_000_000);
     assert.equal(ledger.sessions.stale.source, SOURCE_STATUSLINE);
     assert.equal(ledger.sessions.stale.lastUpdatedAt, 50);
+    assert.equal(ledger.sessions.current.state, STATE_OPEN);
+});
+
+test("auto-closing stale open sessions preserves runtime totals", () => {
+    const now = Date.UTC(2026, 5, 10, 12);
+    const ledger = autoCloseStaleSessions(markOpen({
+        sessions: {
+            stale: {
+                id: "stale",
+                state: STATE_OPEN,
+                totalNanoAiu: 7_000_000_000,
+                source: SOURCE_RUNTIME,
+                lastSeenAt: now - 8 * day,
+                lastUpdatedAt: 60,
+            },
+        },
+    }, "current", now), now);
+
+    assert.equal(ledger.sessions.stale.state, STATE_AUTO_CLOSED);
+    assert.equal(ledger.sessions.stale.totalNanoAiu, 7_000_000_000);
+    assert.equal(ledger.sessions.stale.source, SOURCE_RUNTIME);
+    assert.equal(ledger.sessions.stale.lastUpdatedAt, 60);
     assert.equal(ledger.sessions.current.state, STATE_OPEN);
 });
 
@@ -121,6 +160,45 @@ test("auto-closing stale sessions estimates from token profiles only when no tot
     assert.equal(ledger.sessions.stale.source, SOURCE_ESTIMATED_TOKENS);
     assert.equal(ledger.sessions.stale.estimateConfidence, "low");
     assert.equal(ledger.sessions.stale.totalNanoAiu, 500_000_000);
+});
+
+test("auto-closing stale partial sessions adds token estimates to observed compaction cost", () => {
+    const now = Date.UTC(2026, 5, 10, 12);
+    const ledger = autoCloseStaleSessions({
+        sessions: {
+            pricedProfile: {
+                id: "pricedProfile",
+                state: STATE_CLOSED,
+                source: SOURCE_SHUTDOWN,
+                totalNanoAiu: 1_000_000_000,
+                lastSeenAt: now - day,
+                modelMetrics: {
+                    "gpt-test": {
+                        totalNanoAiu: 1_000_000_000,
+                        tokenTotals: { outputTokens: 100 },
+                    },
+                },
+            },
+            partial: {
+                id: "partial",
+                state: STATE_OPEN,
+                source: SOURCE_COMPACTION,
+                totalNanoAiu: 200_000_000,
+                compactionNanoAiu: 200_000_000,
+                lastSeenAt: now - 8 * day,
+                modelMetrics: {
+                    "gpt-test": {
+                        tokenTotals: { outputTokens: 50 },
+                    },
+                },
+            },
+        },
+    }, now);
+
+    assert.equal(ledger.sessions.partial.state, STATE_AUTO_CLOSED);
+    assert.equal(ledger.sessions.partial.source, SOURCE_ESTIMATED_TOKENS);
+    assert.equal(ledger.sessions.partial.totalNanoAiu, 700_000_000);
+    assert.equal(ledger.sessions.partial.estimateConfidence, "low");
 });
 
 test("auto-closing stale sessions estimates token classes with separate model rates", () => {
@@ -719,6 +797,82 @@ test("ledger windows derive from session bucket timestamps", () => {
         ["today", "week", "month", "preCredit", "history"],
     );
     assert.equal(nanoAiuToUsd(1_000_000_000), 0.01);
+});
+
+test("ledger usage events fall back to model metrics when shutdown total is zero", () => {
+    const now = Date.UTC(2026, 5, 10, 12);
+    const ledger = {
+        sessions: {
+            modelOnly: {
+                id: "modelOnly",
+                state: STATE_CLOSED,
+                source: SOURCE_SHUTDOWN,
+                totalNanoAiu: 0,
+                closedAt: now - day,
+                modelMetrics: {
+                    "gpt-test": {
+                        totalNanoAiu: 2_000_000_000,
+                        tokenTotals: { outputTokens: 100 },
+                    },
+                },
+            },
+        },
+    };
+
+    assert.deepEqual(ledgerUsageEvents(ledger, now), [
+        { at: now - day, usd: 0.02, id: "modelOnly" },
+    ]);
+});
+
+test("ledger windows count concurrent unclosed sessions once per session", () => {
+    const now = Date.UTC(2026, 5, 10, 12);
+    const ledger = {
+        sessions: {
+            sessionA: {
+                id: "sessionA",
+                state: STATE_OPEN,
+                source: SOURCE_USAGE_EVENTS,
+                totalNanoAiu: 3_000_000_000,
+                lastSeenAt: now - 1_000,
+            },
+            sessionB: {
+                id: "sessionB",
+                state: STATE_OPEN,
+                source: SOURCE_USAGE_EVENTS,
+                totalNanoAiu: 2_000_000_000,
+                lastSeenAt: now - 2_000,
+            },
+        },
+    };
+
+    assert.deepEqual(ledgerUsageEvents(ledger, now), [
+        { at: now - 1_000, usd: 0.03, id: "sessionA" },
+        { at: now - 2_000, usd: 0.02, id: "sessionB" },
+    ]);
+    assert.deepEqual(sessionLedgerWindows(ledger, now), {
+        window24hUsd: 0.05,
+        window7dUsd: 0.05,
+        window30dUsd: 0.05,
+    });
+});
+
+test("pruneLedger removes sessions outside the retention horizon", () => {
+    const now = Date.UTC(2026, 11, 1, 12);
+    const ledger = pruneLedger({
+        sessions: {
+            retainedClosed: { id: "retainedClosed", closedAt: now - 180 * day, totalNanoAiu: 1 },
+            retainedOpen: { id: "retainedOpen", lastSeenAt: now - 179 * day },
+            retainedUnknown: { id: "retainedUnknown", totalNanoAiu: 1 },
+            oldClosed: { id: "oldClosed", closedAt: now - 181 * day, totalNanoAiu: 1 },
+            oldFallback: { id: "oldFallback", firstSeenAt: now - 181 * day },
+        },
+    }, now);
+
+    assert.deepEqual(Object.keys(ledger.sessions).sort(), [
+        "retainedClosed",
+        "retainedOpen",
+        "retainedUnknown",
+    ]);
 });
 
 test("mergeSession discovers null sessions without inventing a state", () => {

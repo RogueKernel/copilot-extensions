@@ -1,7 +1,7 @@
 // Maintains the compact per-session cost ledger that backs rolling windows.
 
 import { BILLING, HISTORY } from "../config.mjs";
-import { readJson, updateJson, writeJson } from "../io.mjs";
+import { readJson, updateJson } from "../io.mjs";
 import { optNum } from "../math.mjs";
 import { sessionLedgerPath } from "../storage.mjs";
 import {
@@ -18,9 +18,12 @@ export const SOURCE_NONE = "none";
 export const SOURCE_ESTIMATED_TOKENS = "estimated_tokens";
 export const SOURCE_USAGE_EVENTS = "usage_events";
 export const SOURCE_COMPACTION = "compaction";
+export const SOURCE_RUNTIME = "runtime";
 export const SOURCE_STATUSLINE = "statusline";
 export const SOURCE_MODEL_METRICS = "modelMetrics";
 export const SOURCE_SHUTDOWN = "shutdown";
+export const SURFACE_CLI = "cli";
+export const SURFACE_VSCODE = "vscode";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AUTO_CLOSE_MS = 7 * DAY_MS;
@@ -31,6 +34,7 @@ const SOURCE_RANK = {
     [SOURCE_ESTIMATED_TOKENS]: 1,
     [SOURCE_COMPACTION]: 2,
     [SOURCE_USAGE_EVENTS]: 2,
+    [SOURCE_RUNTIME]: 3,
     [SOURCE_STATUSLINE]: 3,
     [SOURCE_MODEL_METRICS]: 4,
     [SOURCE_SHUTDOWN]: 5,
@@ -45,12 +49,6 @@ const WINDOW_DURATIONS = {
 
 export async function readSessionLedger(path = sessionLedgerPath()) {
     return normalizeLedger(await readJson(path));
-}
-
-export async function writeSessionLedger(ledger, path = sessionLedgerPath()) {
-    const normalized = normalizeLedger(ledger);
-    await writeJson(path, normalized);
-    return normalized;
 }
 
 export async function updateSessionLedger(updater, path = sessionLedgerPath()) {
@@ -69,7 +67,6 @@ export function normalizeLedger(value = {}) {
         version: LEDGER_VERSION,
         lastSyncAt: optNum(value?.lastSyncAt),
         sessions,
-        runtime: normalizeRuntime(value?.runtime),
     };
 }
 
@@ -80,7 +77,7 @@ export function mergeSession(ledger, patch = {}, now = Date.now()) {
     }
 
     const next = normalizeLedger(ledger);
-    const prior = next.sessions[id] ?? { id, state: null, source: SOURCE_NONE };
+    const prior = next.sessions[id] ?? { id, state: null, source: SOURCE_NONE, surface: inferSurface(id) };
     const merged = mergeSessionRecord(prior, { ...patch, id }, now);
     next.sessions[id] = merged;
     next.lastSyncAt = now;
@@ -92,31 +89,22 @@ export function markOpen(ledger, id, now = Date.now(), patch = {}) {
         ...patch,
         id,
         state: STATE_OPEN,
+        surface: patch.surface ?? inferSurface(id),
         firstSeenAt: patch.firstSeenAt ?? now,
         lastSeenAt: patch.lastSeenAt ?? now,
         source: patch.source ?? SOURCE_NONE,
     }, now);
 }
 
-export function mergeLiveStatusline(ledger, { id, totalNanoAiu, at = Date.now() } = {}) {
-    const nano = optNum(totalNanoAiu);
-    return mergeSession(ledger, {
-        id,
-        state: STATE_OPEN,
-        totalNanoAiu: nano,
-        source: nano === undefined ? SOURCE_NONE : SOURCE_STATUSLINE,
-        firstSeenAt: at,
-        lastSeenAt: at,
-    }, at);
-}
-
-export function closeFromShutdown(ledger, { id, totalNanoAiu, modelNanoAiu, modelMetrics, at = Date.now() } = {}) {
+export function closeFromShutdown(ledger, { id, totalNanoAiu, modelNanoAiu, modelMetrics, shutdownType, at = Date.now() } = {}) {
     const total = optNum(totalNanoAiu) ?? optNum(modelNanoAiu);
     return mergeSession(ledger, {
         id,
         state: STATE_CLOSED,
+        surface: inferSurface(id),
         totalNanoAiu: total,
         source: optNum(totalNanoAiu) !== undefined ? SOURCE_SHUTDOWN : SOURCE_MODEL_METRICS,
+        shutdownType,
         modelMetrics,
         closedAt: at,
         lastSeenAt: at,
@@ -131,6 +119,22 @@ export function autoCloseStaleSessions(ledger, now = Date.now()) {
         if (session.state !== STATE_OPEN || !isStale(session, now)) {
             continue;
         }
+        const observedTotal = observedPartialNanoAiu(session);
+        const observedPlusEstimate = estimateUnpricedRemainder(session, profiles, observedTotal);
+        if (observedPlusEstimate) {
+            next = mergeSession(next, {
+                id: session.id,
+                state: STATE_AUTO_CLOSED,
+                totalNanoAiu: observedPlusEstimate.totalNanoAiu,
+                source: SOURCE_ESTIMATED_TOKENS,
+                estimateConfidence: "low",
+                estimateModel: observedPlusEstimate.model,
+                forceTotal: true,
+                lastUpdatedAt: now,
+            }, now);
+            continue;
+        }
+
         const total = storedCurrentPricingNanoAiu(session);
         if (total !== undefined) {
             next = mergeSession(next, {
@@ -156,6 +160,16 @@ export function autoCloseStaleSessions(ledger, now = Date.now()) {
         }, now);
     }
     return next;
+}
+
+export function pruneLedger(ledger, now = Date.now()) {
+    const cutoff = now - RETENTION_MS;
+    const normalized = normalizeLedger(ledger);
+    return {
+        ...normalized,
+        sessions: Object.fromEntries(Object.entries(normalized.sessions)
+            .filter(([, session]) => retainedSession(session, cutoff))),
+    };
 }
 
 export function sessionLedgerWindows(ledger, now = Date.now()) {
@@ -196,6 +210,7 @@ function mergeSessionRecord(prior, patch, now) {
 
     next.id = cleanId(patch.id) ?? prior.id;
     next.state = mergeState(prior.state, patch.state);
+    next.surface = normalizeSurface(patch.surface) ?? normalizeSurface(prior.surface) ?? inferSurface(next.id);
     next.source = shouldReplaceTotal ? patchSource : priorSource;
     if (shouldReplaceTotal) {
         next.totalNanoAiu = patchTotal;
@@ -215,6 +230,7 @@ function mergeSessionRecord(prior, patch, now) {
         "compactionNanoAiu",
         "estimateConfidence",
         "estimateModel",
+        "shutdownType",
         "windowAt",
     ]);
     next.firstSeenAt = minDefined(optNum(prior.firstSeenAt), optNum(patch.firstSeenAt));
@@ -242,6 +258,7 @@ function normalizeSession(session) {
     return dropUndefined({
         id,
         state: normalizeState(session.state),
+        surface: normalizeSurface(session.surface) ?? inferSurface(id),
         totalNanoAiu: optNum(session.totalNanoAiu),
         source: normalizeSource(session.source),
         firstSeenAt: optNum(session.firstSeenAt),
@@ -256,19 +273,11 @@ function normalizeSession(session) {
         compactionNanoAiu: optNum(session.compactionNanoAiu),
         estimateConfidence: session.estimateConfidence,
         estimateModel: session.estimateModel,
+        shutdownType: stringValue(session.shutdownType),
         windowAt: optNum(session.windowAt),
         tokenTotals: normalizeTokenTotals(session.tokenTotals),
         modelMetrics: normalizeModelMetrics(session.modelMetrics),
     });
-}
-
-function normalizeRuntime(value = {}) {
-    if (!value || typeof value !== "object") {
-        return {};
-    }
-    return Object.fromEntries(Object.entries(value)
-        .filter(([key, record]) => cleanId(key) && record && typeof record === "object")
-        .map(([key, record]) => [key, dropUndefined(record)]));
 }
 
 function mergeState(prior, next) {
@@ -288,6 +297,14 @@ function normalizeState(value) {
 
 function normalizeSource(value) {
     return Object.hasOwn(SOURCE_RANK, value) ? value : SOURCE_NONE;
+}
+
+function normalizeSurface(value) {
+    return [SURFACE_CLI, SURFACE_VSCODE].includes(value) ? value : undefined;
+}
+
+function inferSurface(id) {
+    return cleanId(id)?.startsWith(`${SURFACE_VSCODE}:`) ? SURFACE_VSCODE : SURFACE_CLI;
 }
 
 function sourceRank(source) {
@@ -311,6 +328,30 @@ function estimateFromTokens(session, profiles) {
         }
     }
     return totalNanoAiu > 0 ? { totalNanoAiu: Math.round(totalNanoAiu), model: model ?? "global" } : undefined;
+}
+
+function estimateUnpricedRemainder(session, profiles, observedTotal) {
+    const observed = optNum(observedTotal);
+    if (observed === undefined) {
+        return undefined;
+    }
+
+    const modelMetrics = normalizeModelMetrics(session.modelMetrics);
+    let estimatedNanoAiu = 0;
+    let model;
+    for (const [name, metrics] of Object.entries(modelMetrics)) {
+        if (optNum(metrics.totalNanoAiu) !== undefined) {
+            continue;
+        }
+        const estimate = estimateTokenTotals(name, metrics.tokenTotals, profiles);
+        if (estimate > 0) {
+            estimatedNanoAiu += estimate;
+            model ??= name;
+        }
+    }
+    return estimatedNanoAiu > 0
+        ? { totalNanoAiu: Math.round(observed + estimatedNanoAiu), model: model ?? "global" }
+        : undefined;
 }
 
 function rateProfiles(ledger) {
@@ -393,13 +434,23 @@ function bucketTimestamp(session) {
         ?? optNum(session.lastUpdatedAt);
 }
 
+function retainedSession(session, cutoff) {
+    const at = bucketTimestamp(session)
+        ?? optNum(session.firstSeenAt)
+        ?? optNum(session.lastScannedAt);
+    return at === undefined || at >= cutoff;
+}
+
 function currentPricingNanoAiu(session, profiles) {
     if (session.source === SOURCE_ESTIMATED_TOKENS) {
         const estimate = estimateFromTokens(session, profiles);
         return estimate?.totalNanoAiu ?? optNum(session.totalNanoAiu);
     }
     if (!isPreCreditSession(session)) {
-        return optNum(session.totalNanoAiu);
+        return positiveNanoAiu(session.totalNanoAiu)
+            ?? positiveNanoAiu(sumModelMetricsNanoAiu(session.modelMetrics))
+            ?? (session.state === STATE_OPEN ? undefined : estimateFromTokens(session, profiles)?.totalNanoAiu)
+            ?? optNum(session.totalNanoAiu);
     }
 
     const estimate = estimateFromTokens(session, profiles);
@@ -414,6 +465,27 @@ function storedCurrentPricingNanoAiu(session) {
         return optNum(session.totalNanoAiu);
     }
     return session.source === SOURCE_ESTIMATED_TOKENS ? optNum(session.totalNanoAiu) : undefined;
+}
+
+function observedPartialNanoAiu(session) {
+    if (isPreCreditSession(session)) {
+        return undefined;
+    }
+    const source = normalizeSource(session.source);
+    if (![SOURCE_USAGE_EVENTS, SOURCE_COMPACTION].includes(source)) {
+        return undefined;
+    }
+    const total = sumOptional([session.usageNanoAiu, session.compactionNanoAiu]);
+    return total ?? optNum(session.totalNanoAiu);
+}
+
+function sumModelMetricsNanoAiu(modelMetrics = {}) {
+    return sumOptional(Object.values(normalizeModelMetrics(modelMetrics)).map((metrics) => metrics.totalNanoAiu));
+}
+
+function positiveNanoAiu(value) {
+    const nano = optNum(value);
+    return nano > 0 ? nano : undefined;
 }
 
 function isPreCreditSession(session) {
@@ -489,6 +561,7 @@ function materialChange(prior, next, patch) {
     return normalizeState(prior.state) !== normalizeState(next.state)
         || optNum(prior.totalNanoAiu) !== optNum(next.totalNanoAiu)
         || normalizeSource(prior.source) !== normalizeSource(next.source)
+        || normalizeSurface(prior.surface) !== normalizeSurface(next.surface)
         || patch.lastUpdatedAt !== undefined
         || patch.estimateConfidence !== undefined;
 }
@@ -517,8 +590,25 @@ function cleanId(value) {
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function stringValue(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function num(value) {
     return optNum(value) ?? 0;
+}
+
+function sumOptional(values) {
+    let total = 0;
+    let found = false;
+    for (const value of values) {
+        const number = optNum(value);
+        if (number !== undefined) {
+            total += number;
+            found = true;
+        }
+    }
+    return found ? total : undefined;
 }
 
 function dropUndefined(value) {

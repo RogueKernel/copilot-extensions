@@ -126,12 +126,38 @@ test("returns no estimate until context and rates are known", () => {
 test("turn snapshots sample new uncached work and cap rolling history", () => {
     const priorSamples = [1, 2, 3, 4, 5].map((value) => ({ inputTokens: value, outputTokens: value }));
     const patch = snapshotTurn(
-        { nanoAiu: 0, input: 100, output: 20, cacheRead: 70, pricedCacheWrite: 0 },
+        { nanoAiu: 0, input: 100, output: 20, cacheRead: 70, cacheWrite: 0, pricedCacheWrite: 0 },
         { newWorkSamples: priorSamples },
     );
 
     assert.deepEqual(patch.newWorkSamples.map((item) => item.inputTokens), [2, 3, 4, 5, 30]);
-    assert.deepEqual(patch.newWorkSamples.at(-1), { inputTokens: 30, outputTokens: 20 });
+    assert.deepEqual(patch.newWorkSamples.at(-1), { inputTokens: 30, cacheWriteTokens: 0, outputTokens: 20 });
+});
+
+test("turn snapshots price cache writes separately from uncached new work", () => {
+    const patch = snapshotTurn({
+        nanoAiu: 0,
+        input: 100,
+        output: 20,
+        cacheRead: 70,
+        cacheWrite: 10,
+        pricedCacheWrite: 10,
+    });
+
+    assert.deepEqual(patch.newWorkSamples.at(-1), { inputTokens: 20, cacheWriteTokens: 10, outputTokens: 20 });
+});
+
+test("next-turn new-work samples include cache-write cost when priced", () => {
+    const estimate = estimateNext({
+        contextTokens: 0,
+        inputNanoPerToken: 1000,
+        cacheWriteNanoPerToken: 1250,
+        outputNanoPerToken: 2000,
+        newWorkSamples: [{ inputTokens: 20, cacheWriteTokens: 10, outputTokens: 5 }],
+    });
+
+    assertNear(estimate.lowerUsd, 0.000000425);
+    assertNear(estimate.upperUsd, 0.000000425);
 });
 
 test("exposes display totals", () => {

@@ -3,6 +3,7 @@
 // settings and extension discovery files remain in their normal Copilot paths.
 
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -10,6 +11,10 @@ import { stringValue } from "./io.mjs";
 
 const MARKETPLACE_NAME = "copilot-extensions";
 const PLUGIN_NAME = "copilot-cost";
+const require = createRequire(import.meta.url);
+const packageJson = require("../package.json");
+export const PLUGIN_VERSION = packageJson.version;
+
 export function copilotHome() {
     return resolve(process.env.COPILOT_HOME || join(homedir(), ".copilot"));
 }
@@ -26,8 +31,33 @@ export function settingsPath() {
     return join(pluginDataDirectory(), "settings.json");
 }
 
-export function sessionLedgerPath() {
-    return join(pluginDataDirectory(), "session-ledger.json");
+export function sessionLedgerPath(version = PLUGIN_VERSION) {
+    return join(pluginDataDirectory(), sessionLedgerFilename(version));
+}
+
+export function summaryStatePath(version = PLUGIN_VERSION) {
+    return join(pluginDataDirectory(), summaryStateFilename(version));
+}
+
+export function sessionLedgerFilename(version = PLUGIN_VERSION) {
+    return `session-ledger.v${versionSegment(version)}.json`;
+}
+
+export function summaryStateFilename(version = PLUGIN_VERSION) {
+    return `summary-state.v${versionSegment(version)}.json`;
+}
+
+export function isVersionedSessionCacheFilename(filename) {
+    return /^session-ledger\.v[^/]+\.json$/.test(filename)
+        || /^summary-state\.v[^/]+\.json$/.test(filename);
+}
+
+export function isLegacySessionCacheFilename(filename) {
+    return filename === "session-ledger.json" || filename === "summary-state.json";
+}
+
+export function lifecyclePath() {
+    return join(pluginDataDirectory(), "lifecycle.json");
 }
 
 export function sessionStateRootPath() {
@@ -72,4 +102,8 @@ function sessionScoped(workspace, id) {
 
 function sanitizeSegment(value) {
     return String(value ?? "").replace(/[^A-Za-z0-9._-]/g, "-");
+}
+
+function versionSegment(version) {
+    return sanitizeSegment(version || PLUGIN_VERSION);
 }

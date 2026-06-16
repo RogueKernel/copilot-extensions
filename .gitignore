@@ -3,7 +3,7 @@
 
 node_modules/
 coverage/
-.nyc_output/
+.codegraph/
 .scratch/
 
 COPILOT_COST_DEBUG.jsonl

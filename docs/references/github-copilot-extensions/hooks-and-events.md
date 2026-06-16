@@ -38,7 +38,7 @@ The local SDK docs list key event types:
 
 | Event | Useful fields |
 | --- | --- |
-| `assistant.message` | `content`, `messageId`, `toolRequests` |
+| `assistant.message` | `content`, `messageId`, `toolRequests`, `outputTokens`, sometimes `model` |
 | `assistant.streaming_delta` | `totalResponseSizeBytes` |
 | `assistant.turn_start` | `turnId` |
 | `tool.execution_start` | `toolCallId`, `toolName`, `arguments` |

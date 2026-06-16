@@ -1,42 +1,62 @@
 // Discovers local Copilot session telemetry and folds it into the session ledger.
 
-import { readdir, stat } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 import {
     autoCloseStaleSessions,
     closeFromShutdown,
     mergeSession,
+    pruneLedger,
     readSessionLedger,
     SOURCE_COMPACTION,
     SOURCE_NONE,
+    SOURCE_RUNTIME,
     SOURCE_USAGE_EVENTS,
+    SOURCE_MODEL_METRICS,
+    SOURCE_SHUTDOWN,
     STATE_OPEN,
-    updateSessionLedger,
+    STATE_AUTO_CLOSED,
+    STATE_CLOSED,
+    SURFACE_CLI,
 } from "./session-ledger.mjs";
 import { parseSessionEvents } from "./session-jsonl.mjs";
 import { discoverVsCodeTelemetryGroups, parseVsCodeTelemetryGroup } from "./vscode-session.mjs";
+import { syncSessionLedgerCacheAndSummary } from "./windows.mjs";
 import { HISTORY } from "../config.mjs";
 import { optNum } from "../math.mjs";
+import { timestampMs } from "../render/format.mjs";
 import { sessionLedgerPath, sessionStateRootPath } from "../storage.mjs";
+import { readRuntimeSessions } from "../summary-state.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETENTION_MS = HISTORY.retentionDays * DAY_MS;
+const LAST_EVENT_TAIL_BYTES = 256 * 1024;
+const NANO_AIU_PER_USD = 100_000_000_000;
 
 export async function syncSessionLedger({
     currentSessionId,
     sessionStateRoot = sessionStateRootPath(),
     includeVsCodeTelemetry,
+    includeRuntimeState,
     vsCodeUserRoots,
     ledgerPath = sessionLedgerPath(),
+    summaryPath,
     now = Date.now(),
 } = {}) {
-    const shouldIncludeVsCode = includeVsCodeTelemetry ?? (vsCodeUserRoots !== undefined || ledgerPath === sessionLedgerPath());
+    const defaultLedgerPath = sessionLedgerPath();
+    const effectiveSummaryPath = summaryPath ?? (ledgerPath === defaultLedgerPath ? undefined : join(dirname(ledgerPath), "summary-state.json"));
+    const shouldIncludeVsCode = includeVsCodeTelemetry ?? (vsCodeUserRoots !== undefined || ledgerPath === defaultLedgerPath);
+    const shouldIncludeRuntime = includeRuntimeState ?? (summaryPath !== undefined || ledgerPath === defaultLedgerPath);
     const snapshot = await readSessionLedger(ledgerPath);
     const parsedSessions = [];
     for (const file of await discoverSessionEventFiles(sessionStateRoot)) {
         const prior = snapshot.sessions[file.id];
-        if (!shouldParseSessionFile(prior, file, { currentSessionId, now })) {
+        if (prior && file.id !== currentSessionId && shouldSkipTrustedSession(prior, file, now)) {
+            continue;
+        }
+        const latestEventAt = await latestSessionEventAt(file.path) ?? file.mtimeMs;
+        if (!shouldParseSessionFile(prior, { ...file, latestEventAt }, { currentSessionId, now })) {
             continue;
         }
         parsedSessions.push(await parseSessionEvents(file.path, { id: file.id }));
@@ -49,20 +69,23 @@ export async function syncSessionLedger({
             }
         }
     }
+    const runtimeSessions = shouldIncludeRuntime ? await runtimeLedgerSessions(effectiveSummaryPath) : [];
 
-    return updateSessionLedger((existing) => syncSessionLedgerValue(existing, {
+    return syncSessionLedgerCacheAndSummary((existing) => syncSessionLedgerValue(existing, {
         currentSessionId,
         parsedSessions,
+        runtimeSessions,
         now,
-    }), ledgerPath);
+    }), ledgerPath, now, effectiveSummaryPath);
 }
 
-function syncSessionLedgerValue(existing, { currentSessionId, parsedSessions, now }) {
+function syncSessionLedgerValue(existing, { currentSessionId, parsedSessions, runtimeSessions, now }) {
     let ledger = existing;
     if (currentSessionId) {
         ledger = mergeSession(ledger, {
             id: currentSessionId,
             state: STATE_OPEN,
+            surface: SURFACE_CLI,
             firstSeenAt: now,
             lastSeenAt: now,
             source: SOURCE_NONE,
@@ -72,16 +95,97 @@ function syncSessionLedgerValue(existing, { currentSessionId, parsedSessions, no
     for (const parsed of parsedSessions) {
         ledger = mergeParsedSession(ledger, parsed, now);
     }
+    for (const runtime of runtimeSessions) {
+        ledger = mergeRuntimeSession(ledger, runtime, now);
+    }
 
     ledger = autoCloseStaleSessions(ledger, now);
-    return ledger;
+    return pruneLedger(ledger, now);
+}
+
+async function runtimeLedgerSessions(summaryPath) {
+    try {
+        return (await readRuntimeSessions(summaryPath))
+            .map(runtimeLedgerPatch)
+            .filter(Boolean);
+    } catch {
+        return [];
+    }
+}
+
+function runtimeLedgerPatch(record) {
+    const id = cleanId(record?.sessionId);
+    const totalUsd = optNum(record?.officialTotalUsd) ?? optNum(record?.totalUsd);
+    if (!id || totalUsd === undefined) {
+        return undefined;
+    }
+    const at = optNum(record.lastTurnAt)
+        ?? optNum(record.lastEndedAt)
+        ?? optNum(record.lastStartedAt);
+    return {
+        id,
+        totalNanoAiu: Math.round(totalUsd * NANO_AIU_PER_USD),
+        at,
+    };
+}
+
+function mergeRuntimeSession(ledger, runtime, now) {
+    return mergeSession(ledger, {
+        id: runtime.id,
+        state: STATE_OPEN,
+        surface: SURFACE_CLI,
+        totalNanoAiu: runtime.totalNanoAiu,
+        source: SOURCE_RUNTIME,
+        lastSeenAt: runtime.at ?? now,
+        windowAt: runtime.at ?? now,
+        lastUpdatedAt: now,
+    }, now);
 }
 
 function shouldParseSessionFile(prior, file, { currentSessionId, now }) {
+    const isCurrent = file.id === currentSessionId;
+    if (!isCurrent && file.latestEventAt < now - RETENTION_MS) {
+        return false;
+    }
     if (!prior) {
-        return file.id === currentSessionId || file.mtimeMs >= now - RETENTION_MS;
+        return true;
+    }
+    if (!isCurrent && shouldSkipTrustedSession(prior, file, now)) {
+        return false;
     }
     return eventFileChanged(prior, file);
+}
+
+async function latestSessionEventAt(path) {
+    let handle;
+    try {
+        handle = await open(path, "r");
+        const { size } = await handle.stat();
+        const length = Math.min(size, LAST_EVENT_TAIL_BYTES);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, size - length);
+        const raw = buffer.toString("utf8");
+        const lines = raw.trimEnd().split(/\r?\n/);
+        for (let index = lines.length - 1; index >= 0; index -= 1) {
+            const line = lines[index].trim();
+            if (!line || (index === 0 && size > length)) {
+                continue;
+            }
+            try {
+                return timestampMs(JSON.parse(line).timestamp);
+            } catch {
+                continue;
+            }
+        }
+        return undefined;
+    } catch (error) {
+        if (error?.code === "ENOENT") {
+            return undefined;
+        }
+        throw error;
+    } finally {
+        await handle?.close();
+    }
 }
 
 function eventFileChanged(prior, file) {
@@ -93,12 +197,42 @@ function eventFileChanged(prior, file) {
         || Math.abs(priorMtime - file.mtimeMs) > 1;
 }
 
+function cleanId(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function shouldParseVsCodeSession(prior, parsed, now) {
+    const seenAt = optNum(parsed.lastSeenAt) ?? optNum(parsed.eventFileMtimeMs);
+    if (seenAt !== undefined && seenAt < now - RETENTION_MS) {
+        return false;
+    }
     if (!prior) {
-        const seenAt = optNum(parsed.lastSeenAt) ?? optNum(parsed.eventFileMtimeMs);
-        return seenAt === undefined || seenAt >= now - RETENTION_MS;
+        return true;
+    }
+    if (shouldSkipTrustedSession(prior, parsed, now)) {
+        return false;
     }
     return eventFileChanged(prior, parsed);
+}
+
+function shouldSkipTrustedSession(session, file, now) {
+    return (isFinalizedSession(session) || isStaleOpenSession(session, now))
+        && !eventFileChanged(session, file);
+}
+
+function isFinalizedSession(session = {}) {
+    if (session.state === STATE_AUTO_CLOSED) {
+        return true;
+    }
+    return session.state === STATE_CLOSED
+        && [SOURCE_SHUTDOWN, SOURCE_MODEL_METRICS].includes(session.source);
+}
+
+function isStaleOpenSession(session = {}, now) {
+    const lastSeenAt = optNum(session.lastSeenAt);
+    return session.state === STATE_OPEN
+        && lastSeenAt !== undefined
+        && now - lastSeenAt >= 7 * DAY_MS;
 }
 
 export async function discoverSessionEventFiles(root = sessionStateRootPath()) {
@@ -138,6 +272,7 @@ export function mergeParsedSession(ledger, parsed, now = Date.now()) {
 
     const common = {
         id,
+        surface: parsed.surface ?? SURFACE_CLI,
         firstSeenAt: parsed.firstSeenAt,
         lastSeenAt: parsed.lastSeenAt,
         lastScannedAt: now,
@@ -146,19 +281,21 @@ export function mergeParsedSession(ledger, parsed, now = Date.now()) {
         usageNanoAiu: parsed.usageNanoAiu,
         modelNanoAiu: parsed.modelNanoAiu,
         compactionNanoAiu: parsed.compactionNanoAiu,
+        shutdownType: parsed.shutdownType,
         tokenTotals: parsed.tokenTotals,
         modelMetrics: parsed.modelMetrics,
     };
-    const prePricing = isPrePricingSession(parsed);
-    if (!prePricing && (optNum(parsed.totalNanoAiu) !== undefined || optNum(parsed.modelNanoAiu) !== undefined)) {
+    if (parsed.sawShutdown || parsed.shutdownType || optNum(parsed.totalNanoAiu) !== undefined || optNum(parsed.modelNanoAiu) !== undefined) {
         return mergeSession(closeFromShutdown(ledger, {
             ...common,
             totalNanoAiu: parsed.totalNanoAiu,
             modelNanoAiu: parsed.modelNanoAiu,
+            shutdownType: parsed.shutdownType,
             at: parsed.lastSeenAt ?? now,
         }), common, now);
     }
 
+    const prePricing = isPrePricingSession(parsed);
     const partial = prePricing ? { source: SOURCE_NONE, totalNanoAiu: undefined } : partialNanoAiu(parsed);
     return mergeSession(ledger, {
         ...common,

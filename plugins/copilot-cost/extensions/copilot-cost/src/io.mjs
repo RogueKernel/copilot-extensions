@@ -22,12 +22,12 @@ export async function readJson(filePath) {
     }
 }
 
-// Keeps persisted state human-readable and safe for first-run directories.
+// Keeps persisted state compact and safe for first-run directories.
 export async function writeJson(filePath, value) {
     await mkdir(dirname(filePath), { recursive: true });
     const tempPath = join(dirname(filePath), `.${basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
     try {
-        await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
+        await writeFile(tempPath, `${JSON.stringify(value)}\n`);
         await rename(tempPath, filePath);
     } catch (error) {
         await rm(tempPath, { force: true });

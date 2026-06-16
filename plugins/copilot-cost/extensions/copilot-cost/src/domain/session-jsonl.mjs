@@ -19,6 +19,17 @@ export async function parseSessionEvents(filePath, { id } = {}) {
         usageNanoAiu: undefined,
         compactionNanoAiu: undefined,
         tokenTotals: undefined,
+        usageTokenTotals: undefined,
+        messageTokenTotals: undefined,
+        compactionTokenTotals: undefined,
+        shutdownTokenTotals: undefined,
+        shutdownType: undefined,
+        sawShutdown: false,
+        sawShutdownMetrics: false,
+        activeModel: undefined,
+        lastModel: undefined,
+        messageModelMetrics: {},
+        compactionModelMetrics: {},
         modelMetrics: {},
         eventFileMtimeMs: file.mtimeMs,
         eventFileSize: file.size,
@@ -48,13 +59,25 @@ export async function parseSessionEvents(filePath, { id } = {}) {
         collectEvent(summary, event);
     }
 
-    return dropEmpty(summary);
+    return dropEmpty(finalizeSummary(summary));
 }
 
 function collectEvent(summary, event) {
     const data = event?.data ?? {};
     if (event.type === "assistant.usage") {
         collectAssistantUsage(summary, data);
+        return;
+    }
+    if (event.type === "assistant.message") {
+        collectAssistantMessage(summary, data);
+        return;
+    }
+    if (event.type === "session.model_change") {
+        collectModelChange(summary, data);
+        return;
+    }
+    if (event.type === "tool.execution_start" || event.type === "tool.execution_complete") {
+        collectToolModel(summary, data);
         return;
     }
     if (event.type === "session.compaction_complete") {
@@ -72,10 +95,42 @@ function collectAssistantUsage(summary, data) {
         summary.usageNanoAiu = num(summary.usageNanoAiu) + nano;
     }
     const tokens = tokenTotalsFromUsage(data);
+    summary.usageTokenTotals = addTokenTotals(summary.usageTokenTotals, tokens);
     summary.tokenTotals = addTokenTotals(summary.tokenTotals, tokens);
     const model = modelName(data);
     if (model) {
+        summary.lastModel = model;
         mergeModelMetric(summary, model, { tokenTotals: tokens, totalNanoAiu: nano }, { totalMode: "add" });
+    }
+}
+
+function collectAssistantMessage(summary, data) {
+    const model = modelName(data) ?? summary.activeModel ?? summary.lastModel;
+    if (model) {
+        summary.lastModel = model;
+    }
+    const tokens = cleanTokens({ outputTokens: optNum(data.outputTokens) });
+    summary.messageTokenTotals = addTokenTotals(summary.messageTokenTotals, tokens);
+    if (model && tokens) {
+        mergeModelMetric(summary, model, { tokenTotals: tokens }, {
+            targetKey: "messageModelMetrics",
+            totalMode: "add",
+        });
+    }
+}
+
+function collectModelChange(summary, data) {
+    const model = stringValue(data.newModel) ?? stringValue(data.model);
+    if (model) {
+        summary.activeModel = model;
+        summary.lastModel = model;
+    }
+}
+
+function collectToolModel(summary, data) {
+    const model = modelName(data);
+    if (model) {
+        summary.lastModel = model;
     }
 }
 
@@ -85,18 +140,32 @@ function collectCompaction(summary, data) {
     if (nano !== undefined) {
         summary.compactionNanoAiu = num(summary.compactionNanoAiu) + nano;
     }
-    summary.tokenTotals = addTokenTotals(summary.tokenTotals, tokenTotalsFromUsage(usage));
+    const tokens = tokenTotalsFromUsage(usage);
+    summary.compactionTokenTotals = addTokenTotals(summary.compactionTokenTotals, tokens);
+    summary.tokenTotals = addTokenTotals(summary.tokenTotals, tokens);
+    const model = modelName(usage) ?? summary.activeModel ?? summary.lastModel;
+    if (model && (tokens || nano !== undefined)) {
+        mergeModelMetric(summary, model, { tokenTotals: tokens, totalNanoAiu: nano }, {
+            targetKey: "compactionModelMetrics",
+            totalMode: "add",
+        });
+    }
 }
 
 function collectShutdown(summary, data) {
+    summary.sawShutdown = true;
+    if (typeof data.shutdownType === "string" && data.shutdownType.trim()) {
+        summary.shutdownType = data.shutdownType.trim();
+    }
     const total = optNum(data.totalNanoAiu);
     if (total !== undefined) {
         summary.totalNanoAiu = total;
     }
 
-    const modelMetrics = modelMetricsFromShutdown(data.modelMetrics);
-    for (const [model, metrics] of Object.entries(modelMetrics)) {
-        mergeModelMetric(summary, model, metrics);
+    const modelMetrics = shutdownModelMetricsWithFallback(modelMetricsFromShutdown(data.modelMetrics), summary.modelMetrics);
+    if (Object.keys(modelMetrics).length) {
+        summary.sawShutdownMetrics = true;
+        summary.modelMetrics = modelMetrics;
     }
 
     const modelNanoAiu = Object.values(modelMetrics).reduce((sum, metrics) => sum + num(metrics.totalNanoAiu), 0);
@@ -107,11 +176,41 @@ function collectShutdown(summary, data) {
     const tokenTotals = Object.values(modelMetrics)
         .map((metrics) => metrics.tokenTotals)
         .reduce((totals, tokens) => addTokenTotals(totals, tokens), undefined);
-    summary.tokenTotals = addTokenTotals(summary.tokenTotals, tokenTotals);
+    summary.shutdownTokenTotals = addTokenTotals(summary.shutdownTokenTotals, tokenTotals);
+    summary.tokenTotals = addTokenTotals(tokenTotals, summary.compactionTokenTotals);
     const totalPremiumRequests = optNum(data.totalPremiumRequests);
     if (totalPremiumRequests !== undefined) {
-        summary.tokenTotals = addTokenTotals(summary.tokenTotals, { requestCount: totalPremiumRequests });
+        summary.shutdownTokenTotals = {
+            ...(summary.shutdownTokenTotals ?? {}),
+            requestCount: totalPremiumRequests,
+        };
+        summary.tokenTotals = {
+            ...(summary.tokenTotals ?? {}),
+            requestCount: totalPremiumRequests,
+        };
     }
+}
+
+function finalizeSummary(summary) {
+    if (summary.sawShutdownMetrics) {
+        summary.tokenTotals = addTokenTotals(summary.shutdownTokenTotals, summary.compactionTokenTotals);
+    } else if (summary.usageTokenTotals) {
+        summary.tokenTotals = addTokenTotals(summary.usageTokenTotals, summary.compactionTokenTotals);
+    } else {
+        summary.tokenTotals = addTokenTotals(summary.messageTokenTotals, summary.compactionTokenTotals);
+        mergeModelMetrics(summary.modelMetrics, summary.messageModelMetrics);
+        mergeModelMetrics(summary.modelMetrics, summary.compactionModelMetrics);
+    }
+    delete summary.usageTokenTotals;
+    delete summary.messageTokenTotals;
+    delete summary.compactionTokenTotals;
+    delete summary.shutdownTokenTotals;
+    delete summary.sawShutdownMetrics;
+    delete summary.activeModel;
+    delete summary.lastModel;
+    delete summary.messageModelMetrics;
+    delete summary.compactionModelMetrics;
+    return summary;
 }
 
 export function modelMetricsFromShutdown(modelMetrics = {}) {
@@ -134,15 +233,46 @@ export function modelMetricsFromShutdown(modelMetrics = {}) {
     }).filter(([model]) => typeof model === "string" && model.trim()));
 }
 
-function mergeModelMetric(summary, model, patch, { totalMode = "replace" } = {}) {
-    const prior = summary.modelMetrics[model] ?? {};
+function shutdownModelMetricsWithFallback(shutdownMetrics, fallbackMetrics = {}) {
+    const next = {};
+    for (const [model, metrics] of Object.entries(shutdownMetrics)) {
+        const fallback = fallbackMetrics[model];
+        const tokenTotals = hasTokenClassTotals(metrics.tokenTotals)
+            ? metrics.tokenTotals
+            : addTokenTotals(fallback?.tokenTotals, metrics.tokenTotals);
+        next[model] = dropEmpty({
+            totalNanoAiu: metrics.totalNanoAiu,
+            tokenTotals,
+        });
+    }
+    return next;
+}
+
+function hasTokenClassTotals(tokens = {}) {
+    return ["inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "reasoningTokens"]
+        .some((key) => optNum(tokens?.[key]) !== undefined);
+}
+
+function mergeModelMetric(summary, model, patch, { targetKey = "modelMetrics", totalMode = "replace" } = {}) {
+    const target = summary[targetKey];
+    const prior = target[model] ?? {};
     const patchTotal = optNum(patch.totalNanoAiu);
-    summary.modelMetrics[model] = {
+    target[model] = dropEmpty({
         totalNanoAiu: totalMode === "add" && patchTotal !== undefined
             ? num(prior.totalNanoAiu) + patchTotal
             : patchTotal ?? prior.totalNanoAiu,
         tokenTotals: addTokenTotals(prior.tokenTotals, patch.tokenTotals),
-    };
+    });
+}
+
+function mergeModelMetrics(target, source) {
+    for (const [model, metrics] of Object.entries(source ?? {})) {
+        const prior = target[model] ?? {};
+        target[model] = dropEmpty({
+            totalNanoAiu: optNum(prior.totalNanoAiu) ?? optNum(metrics.totalNanoAiu),
+            tokenTotals: addTokenTotals(prior.tokenTotals, metrics.tokenTotals),
+        });
+    }
 }
 
 function tokenTotalsFromUsage(usage = {}) {

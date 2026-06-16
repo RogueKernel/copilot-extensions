@@ -27,7 +27,7 @@ test("collects charged cache-write usage without marking the turn partial", () =
 
     const state = snapshotTurn(turn, {}, { currentTokens: 1000 });
     const next = estimateNext(state);
-    assert.equal(next.upperUsd, 0.0000136);
+    assert.ok(Math.abs(next.upperUsd - 0.000013675) < 1e-12);
 });
 
 test("collects unpriced cache writes as partial usage", () => {

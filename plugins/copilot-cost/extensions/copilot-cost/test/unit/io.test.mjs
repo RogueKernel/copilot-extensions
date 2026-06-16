@@ -13,17 +13,17 @@ test("readJson treats missing files as first-run state", async () => {
     assert.equal(await readJson(join(dir, "missing.json")), undefined);
 });
 
-test("writeJson creates parents and writes formatted JSON with a trailing newline", async () => {
+test("writeJson creates parents and writes minified JSON with a trailing newline", async () => {
     const dir = await mkdtemp(join(tmpdir(), "copilot-cost-io-"));
     const path = join(dir, "nested", "state.json");
 
     await writeJson(path, { totalUsd: 1, pendingUsd: 0.25 });
 
-    assert.equal(await readFile(path, "utf8"), "{\n  \"totalUsd\": 1,\n  \"pendingUsd\": 0.25\n}\n");
+    assert.equal(await readFile(path, "utf8"), "{\"totalUsd\":1,\"pendingUsd\":0.25}\n");
     assert.deepEqual(await readJson(path), { totalUsd: 1, pendingUsd: 0.25 });
 });
 
-test("updateJson serializes updates and writes formatted JSON", async () => {
+test("updateJson serializes updates and writes minified JSON", async () => {
     const dir = await mkdtemp(join(tmpdir(), "copilot-cost-io-"));
     const path = join(dir, "state.json");
     await writeJson(path, { count: 0 });
@@ -32,7 +32,7 @@ test("updateJson serializes updates and writes formatted JSON", async () => {
         count: state.count + 1,
     }))));
 
-    assert.equal(await readFile(path, "utf8"), "{\n  \"count\": 5\n}\n");
+    assert.equal(await readFile(path, "utf8"), "{\"count\":5}\n");
 });
 
 test("readJson surfaces malformed JSON", async () => {

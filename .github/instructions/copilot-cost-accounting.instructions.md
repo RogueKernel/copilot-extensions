@@ -1,17 +1,16 @@
 ---
-applyTo: "plugins/copilot-cost/**,docs/copilot-cost/**,README.md,LEARNINGS_TO_INVESTIGATE.md"
+applyTo: "plugins/copilot-cost/extensions/copilot-cost/src/domain/**,plugins/copilot-cost/extensions/copilot-cost/src/runtime/**,plugins/copilot-cost/extensions/copilot-cost/src/render/**,plugins/copilot-cost/extensions/copilot-cost/test/unit/**"
 ---
 
 # copilot-cost accounting guardrails
 
-- Preserve the official-vs-pending model in `plugins/copilot-cost/extensions/copilot-cost/src/domain/cost.mjs`.
-- `assistant.usage` and compaction events create local pending cost while Copilot's official counter lags; they are not enough for final `Total` because they can miss tool calls and sub-agent work.
-- Statusline `ai_used.total_nano_aiu` is the official active-session counter. It must reconcile `Total`, clear caught-up `pendingUsd`, update `Sess`, and update the current `session-ledger.json` record when `session_id` is present.
-- Rolling 24h/7d/30d windows are ledger-derived. Do not reintroduce `history.json` or any other legacy rolling-history fallback.
-- Usage-based billing started on 2026-06-01. Pre-cutover pay-per-message totals must not be treated as usage-based cost; use retained JSONL token telemetry to estimate historical equivalent cost under the current usage-based model when a post-cutover token-rate profile exists.
-- Do not change statusline handling to "Sess-only" or make rolling windows local-only. The e2e tests named `statusline reconciles official session usage into Total and ledger windows`, `statusline official catch-up replaces lower locally observed total`, and `statusline scopes totals to each session under a shared session-state root` protect this behavior.
-- Keep `session-ledger.json` content-free. JSONL historical sync may retain cost/token metadata, timestamps, session ids, and file metadata only; runtime state may retain only reconciliation, context/rate, estimate, and last-message display values. Never persist prompts, responses, transcript text, paths, tool arguments, or source code.
-- Keep runtime state in the ledger's top-level `runtime` map; do not recreate `sessions/*.json`. Use `updateSessionLedger()` for ledger read-modify-write paths so concurrent statusline/extension processes serialize updates and write atomically.
-- Preserve ledger states: `open`, `closed`, and `auto_closed`. Do not re-aggregate known `open`/`closed`/`auto_closed` sessions from JSONL during startup; live statusline updates maintain open sessions, and stale open sessions older than 7 days become `auto_closed`.
-- Keep the `officialStartedUsd` turn-start guard in `src/runtime/extension.mjs`; it prevents double-counting when official usage catches up while a turn is in flight.
-- If account/quota APIs are investigated, avoid implementation paths that trigger unexpected OS keychain prompts. Use already-authenticated extension/statusline surfaces or require explicit user opt-in.
+- For estimate or accounting changes, consult `docs/copilot-cost/algorithms/next-message-cost-estimate.md` and `docs/copilot-cost/algorithms/historical-cost.md` before editing code.
+- Preserve the official-vs-pending model in `src/domain/cost.mjs`. `assistant.usage` and successful compactions create local pending cost while Copilot's official counter lags; they are not sufficient as final `Total` because they can miss tool-side and sub-agent work.
+- The native extension may call `session.rpc.usage.getMetrics().totalNanoAiu` to reconcile current-session display state. That official counter updates `Total`, clears caught-up `pendingUsd`, and updates the displayed `Sess` value in summary runtime state.
+- The standalone statusline command is read-only. It must not reconcile official usage, write context, or update the ledger from stdin `ai_used.total_nano_aiu`.
+- Keep `officialStartedUsd` in `src/runtime/extension.mjs`. It prevents double-counting when official usage catches up while a turn is in flight.
+- Rolling 24h/7d/30d values are not live per-turn accounting. They are recomputed from the session ledger during full sync and cached in summary state. Full sync may fold current summary runtime totals for still-open sessions into the ledger because active JSONL logs can lack live cost until shutdown. Do not reintroduce live per-turn rolling-window deltas, `history.json`, or another parallel rolling-history store.
+- Usage-based billing started on 2026-06-01. Pre-cutover pay-per-message totals must not be treated as usage-based cost. Retained pre-cutover token telemetry may be shown only as a historical equivalent under the current usage-based model when a trustworthy model/token rate is available.
+- Token pricing must remain per model and per token class. Do not use a blended global rate when the model or token class is unknown.
+- Keep retained accounting data content-free: no prompts, responses, transcript text, tool arguments, source code, or absolute local paths.
+- If account/quota APIs are investigated, avoid paths that unexpectedly trigger OS keychain prompts. Prefer already-authenticated extension surfaces or explicit opt-in.

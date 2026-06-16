@@ -4,7 +4,6 @@
 
 import { DISPLAY, STYLE } from "./config.mjs";
 import { rm } from "node:fs/promises";
-import { readSessionLedger } from "./domain/session-ledger.mjs";
 import { SESSION_EXPORT_FILENAME, exportSessionData } from "./domain/session-export.mjs";
 import { currentSessionId, syncSessionLedger } from "./domain/session-sync.mjs";
 import { readJson, writeJson } from "./io.mjs";
@@ -214,7 +213,7 @@ async function promptExportSessionData(session, settings) {
     try {
         await syncCurrentSessionLedger(session);
         const result = await exportSessionData();
-        await session.log(`Exported ${result.sessionCount} Copilot CLI session records to ${result.outputPath}`);
+        await session.log(`Exported ${result.sessionCount} local session or ledger records to ${result.outputPath}`);
         const selection = await selectChoice(session, [
             "Session data export complete.",
             "",
@@ -303,16 +302,16 @@ async function overviewPrompt(session, settings) {
 }
 
 async function overviewText(session, settings) {
-    await syncCurrentSessionLedger(session);
+    const ledger = await syncCurrentSessionLedger(session);
     return renderCostOverview({
-        ledger: await readSessionLedger(),
+        ledger,
         state: await readState(session.workspacePath),
         settings,
     });
 }
 
 async function syncCurrentSessionLedger(session) {
-    await syncSessionLedger({ currentSessionId: currentSessionId(session) });
+    return syncSessionLedger({ currentSessionId: currentSessionId(session) });
 }
 
 function infoPrompt() {

@@ -167,12 +167,13 @@ test("configure syncs the current ledger before rendering the overview", async (
         import { readFile } from "node:fs/promises";
         import { join } from "node:path";
         import { configure } from "./src/settings.mjs";
+        import { sessionLedgerPath } from "./src/storage.mjs";
         const logs = [];
         await configure({
             workspacePath: join(process.env.COPILOT_HOME, "session-state", "current-session"),
             log: async (value) => logs.push(value),
         }, { args: "unknown" });
-        const ledger = JSON.parse(await readFile(join(process.env.COPILOT_PLUGIN_DATA, "session-ledger.json"), "utf8"));
+        const ledger = JSON.parse(await readFile(sessionLedgerPath(), "utf8"));
         console.log(JSON.stringify({ logs, ledger }));
     `));
 
@@ -391,10 +392,11 @@ test("interactive clear plugin data removes the plugin-data directory after conf
         import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
         import { join } from "node:path";
         import { configure } from "./src/settings.mjs";
+        import { sessionLedgerPath } from "./src/storage.mjs";
 
         await mkdir(join(process.env.COPILOT_PLUGIN_DATA, "nested"), { recursive: true });
         await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "settings.json"), JSON.stringify({ mode: "footer" }));
-        await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "session-ledger.json"), JSON.stringify({ version: 1, sessions: {} }));
+        await writeFile(sessionLedgerPath(), JSON.stringify({ version: 1, sessions: {} }));
         await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "install-state.json"), JSON.stringify({ hadStatusLine: true }));
         await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "nested", "other.json"), "{}");
 
@@ -476,6 +478,7 @@ test("interactive settings can export session data and return to settings", asyn
         import { mkdir, readFile, writeFile } from "node:fs/promises";
         import { join } from "node:path";
         import { configure } from "./src/settings.mjs";
+        import { sessionLedgerPath } from "./src/storage.mjs";
 
         process.chdir(${JSON.stringify(exportDir)});
 
@@ -487,7 +490,7 @@ test("interactive settings can export session data and return to settings", asyn
             data: { totalNanoAiu: 500 },
         }) + "\\n");
         await mkdir(process.env.COPILOT_PLUGIN_DATA, { recursive: true });
-        await writeFile(join(process.env.COPILOT_PLUGIN_DATA, "session-ledger.json"), JSON.stringify({
+        await writeFile(sessionLedgerPath(), JSON.stringify({
             version: 1,
             sessions: {
                 "session-a": { id: "session-a", state: "closed", source: "shutdown", totalNanoAiu: 500 },
@@ -516,7 +519,7 @@ test("interactive settings can export session data and return to settings", asyn
         console.log(JSON.stringify({ logs, requests, rows }));
     `));
 
-    assert.match(result.logs[0], /Exported 1 Copilot CLI session records/);
+    assert.match(result.logs[0], /Exported 1 local session or ledger records/);
     assert.match(result.logs[0], /COPILOT_COST_DEBUG\.jsonl/);
     assert.equal(result.rows.length, 1);
     assert.equal(result.rows[0].sessionId, "session-a");

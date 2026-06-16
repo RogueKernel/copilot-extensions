@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runFirstRunTasks, runStartupTasks } from "../../src/first-run.mjs";
+import { resetLedgerOnVersionChange, runFirstRunTasks, runStartupTasks } from "../../src/first-run.mjs";
+import { PLUGIN_VERSION, sessionLedgerFilename, summaryStateFilename } from "../../src/storage.mjs";
 
 test("runStartupTasks configures statusline and removes legacy shim for existing users", async () => {
     const home = await mkdtemp(join(tmpdir(), "copilot-cost-home-"));
@@ -18,7 +19,7 @@ test("runStartupTasks configures statusline and removes legacy shim for existing
 
     const result = await runStartupTasks({ copilotHome: home, pluginDataDirectory: data, extensionEntrypoint, platform: "posix" });
 
-    assert.deepEqual(result, { statuslineConfigured: true, legacyShimRemoved: true });
+    assert.deepEqual(result, { ledgerCleared: false, summaryCleared: false, statuslineConfigured: true, legacyShimRemoved: true });
     const settings = JSON.parse(await readFile(join(home, "settings.json"), "utf8"));
     assert.equal(settings.footer.showCustom, true);
     assert.deepEqual(settings.disabledSkills, ["other-skill"]);
@@ -30,18 +31,20 @@ test("runFirstRunTasks configures the statusline after first persisted workspace
     const data = await mkdtemp(join(tmpdir(), "copilot-cost-data-"));
     const extensionEntrypoint = join(await mkdtemp(join(tmpdir(), "copilot-cost-extension-")), "extension.mjs");
     await writeFile(extensionEntrypoint, "");
+    await writeFile(join(data, sessionLedgerFilename(PLUGIN_VERSION)), JSON.stringify({ version: 1, runtime: { workspace: {} } }));
 
     const result = await runFirstRunTasks(
         { workspacePath: "/workspace", priorState: undefined },
         { copilotHome: home, pluginDataDirectory: data, extensionEntrypoint, platform: "posix" },
     );
 
-    assert.deepEqual(result, { firstRun: true, statuslineConfigured: true, legacyShimRemoved: false });
+    assert.deepEqual(result, { firstRun: true, ledgerCleared: false, summaryCleared: false, statuslineConfigured: true, legacyShimRemoved: false });
     const settings = JSON.parse(await readFile(join(home, "settings.json"), "utf8"));
     assert.equal(settings.footer.showCustom, true);
     assert.equal(settings.statusLine.type, "command");
     assert.match(settings.statusLine.command, /^node /);
     assert.match(settings.statusLine.command, /extension\.mjs' '--statusline'/);
+    assert.deepEqual(JSON.parse(await readFile(join(data, sessionLedgerFilename(PLUGIN_VERSION)), "utf8")), { version: 1, runtime: { workspace: {} } });
     assert.deepEqual(JSON.parse(await readFile(join(data, "install-state.json"), "utf8")), {
         hadStatusLine: false,
         statusLine: null,
@@ -56,11 +59,11 @@ test("runFirstRunTasks skips sessions that already have state or no persisted wo
     assert.deepEqual(await runFirstRunTasks(
         { workspacePath: "/workspace", priorState: { totalUsd: 1 } },
         { copilotHome: home },
-    ), { firstRun: false, statuslineConfigured: false, legacyShimRemoved: false });
+    ), { firstRun: false, ledgerCleared: false, summaryCleared: false, statuslineConfigured: false, legacyShimRemoved: false });
     assert.deepEqual(await runFirstRunTasks(
         { workspacePath: undefined, priorState: undefined },
         { copilotHome: home },
-    ), { firstRun: false, statuslineConfigured: false, legacyShimRemoved: false });
+    ), { firstRun: false, ledgerCleared: false, summaryCleared: false, statuslineConfigured: false, legacyShimRemoved: false });
 
     await assert.rejects(() => readFile(join(home, "settings.json"), "utf8"), { code: "ENOENT" });
 });
@@ -79,7 +82,7 @@ test("runFirstRunTasks removes the old generated user shim without touching unma
         { copilotHome: home, pluginDataDirectory: data, extensionEntrypoint, platform: "posix" },
     );
 
-    assert.deepEqual(result, { firstRun: true, statuslineConfigured: true, legacyShimRemoved: true });
+    assert.deepEqual(result, { firstRun: true, ledgerCleared: false, summaryCleared: false, statuslineConfigured: true, legacyShimRemoved: true });
     await assert.rejects(() => readFile(shim, "utf8"), { code: "ENOENT" });
 
     await mkdir(join(home, "extensions", "copilot-cost"), { recursive: true });
@@ -92,4 +95,56 @@ test("runFirstRunTasks removes the old generated user shim without touching unma
 
     assert.equal(second.legacyShimRemoved, false);
     assert.equal(await readFile(shim, "utf8"), "// user-owned extension\n");
+});
+
+test("resetLedgerOnVersionChange keeps ledger when version is unchanged", async () => {
+    const data = await mkdtemp(join(tmpdir(), "copilot-cost-data-"));
+    const ledger = join(data, sessionLedgerFilename("1.2.3"));
+    const summary = join(data, summaryStateFilename("1.2.3"));
+    await writeFile(ledger, JSON.stringify({ version: 1, sessions: { abc: { id: "abc" } } }));
+    await writeFile(summary, JSON.stringify({ version: 1, liveSessions: { abc: {} } }));
+    await writeFile(join(data, "lifecycle.json"), JSON.stringify({ extensionVersion: "1.2.3" }));
+
+    const result = await resetLedgerOnVersionChange({ pluginDataDirectory: data, extensionVersion: "1.2.3" });
+
+    assert.deepEqual(result, { ledgerCleared: false, summaryCleared: false, fromVersion: undefined, toVersion: "1.2.3" });
+    assert.match(await readFile(ledger, "utf8"), /abc/);
+    assert.match(await readFile(summary, "utf8"), /abc/);
+});
+
+test("resetLedgerOnVersionChange clears rebuildable caches for changed versions", async () => {
+    const data = await mkdtemp(join(tmpdir(), "copilot-cost-data-"));
+    await writeFile(join(data, "session-ledger.json"), JSON.stringify({ version: 1, sessions: { legacy: { id: "legacy" } } }));
+    await writeFile(join(data, "summary-state.json"), JSON.stringify({ version: 1, liveSessions: { legacy: {} } }));
+    await writeFile(join(data, sessionLedgerFilename("1.2.2")), JSON.stringify({ version: 1, sessions: { old: { id: "old" } } }));
+    await writeFile(join(data, summaryStateFilename("1.2.2")), JSON.stringify({ version: 1, liveSessions: { old: {} } }));
+    await writeFile(join(data, sessionLedgerFilename("1.2.3")), JSON.stringify({ version: 1, sessions: { current: { id: "current" } } }));
+    await writeFile(join(data, summaryStateFilename("1.2.3")), JSON.stringify({ version: 1, liveSessions: { current: {} } }));
+    await writeFile(join(data, "settings.json"), JSON.stringify({ mode: "footer" }));
+    await writeFile(join(data, "install-state.json"), JSON.stringify({ hadStatusLine: true }));
+    await writeFile(join(data, "lifecycle.json"), JSON.stringify({ extensionVersion: "1.2.2" }));
+
+    const result = await resetLedgerOnVersionChange({ pluginDataDirectory: data, extensionVersion: "1.2.3" });
+
+    assert.deepEqual(result, { ledgerCleared: true, summaryCleared: true, fromVersion: "1.2.2", toVersion: "1.2.3" });
+    await assert.rejects(() => readFile(join(data, "session-ledger.json"), "utf8"), { code: "ENOENT" });
+    await assert.rejects(() => readFile(join(data, "summary-state.json"), "utf8"), { code: "ENOENT" });
+    await assert.rejects(() => readFile(join(data, sessionLedgerFilename("1.2.2")), "utf8"), { code: "ENOENT" });
+    await assert.rejects(() => readFile(join(data, summaryStateFilename("1.2.2")), "utf8"), { code: "ENOENT" });
+    await assert.rejects(() => readFile(join(data, sessionLedgerFilename("1.2.3")), "utf8"), { code: "ENOENT" });
+    await assert.rejects(() => readFile(join(data, summaryStateFilename("1.2.3")), "utf8"), { code: "ENOENT" });
+    assert.deepEqual(JSON.parse(await readFile(join(data, "settings.json"), "utf8")), { mode: "footer" });
+    assert.deepEqual(JSON.parse(await readFile(join(data, "install-state.json"), "utf8")), { hadStatusLine: true });
+    assert.deepEqual(JSON.parse(await readFile(join(data, "lifecycle.json"), "utf8")), { extensionVersion: "1.2.3" });
+});
+
+test("resetLedgerOnVersionChange treats existing ledger without marker as upgrade", async () => {
+    const data = await mkdtemp(join(tmpdir(), "copilot-cost-data-"));
+    await writeFile(join(data, "session-ledger.json"), JSON.stringify({ version: 1, sessions: { abc: { id: "abc" } } }));
+
+    const result = await resetLedgerOnVersionChange({ pluginDataDirectory: data, extensionVersion: "1.2.3" });
+
+    assert.deepEqual(result, { ledgerCleared: true, summaryCleared: false, fromVersion: undefined, toVersion: "1.2.3" });
+    await assert.rejects(() => readFile(join(data, "session-ledger.json"), "utf8"), { code: "ENOENT" });
+    assert.deepEqual(JSON.parse(await readFile(join(data, "lifecycle.json"), "utf8")), { extensionVersion: "1.2.3" });
 });

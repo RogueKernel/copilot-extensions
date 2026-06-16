@@ -6,6 +6,7 @@
 | --- | --- |
 | [`usage.md`](usage.md) | Install, configure, and customize the extension. |
 | [`architecture.md`](architecture.md) | Understand runtime flow, accounting, persistence, and extension-system behavior. |
+| [`algorithms/`](algorithms/) | Understand user-visible accounting algorithms and estimates. |
 | [`development.md`](development.md) | Run tests, validate changes, and follow project conventions. |
 
 The plugin README remains at [`plugins/copilot-cost/README.md`](../../plugins/copilot-cost/README.md) for marketplace browsing.

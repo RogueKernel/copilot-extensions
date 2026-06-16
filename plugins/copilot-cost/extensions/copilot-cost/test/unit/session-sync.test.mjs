@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,12 +12,16 @@ import {
 import {
     SOURCE_ESTIMATED_TOKENS,
     SOURCE_MODEL_METRICS,
+    SOURCE_RUNTIME,
     SOURCE_SHUTDOWN,
     SOURCE_STATUSLINE,
     SOURCE_USAGE_EVENTS,
     STATE_AUTO_CLOSED,
     STATE_CLOSED,
     STATE_OPEN,
+    SURFACE_CLI,
+    SURFACE_VSCODE,
+    sessionLedgerWindows,
 } from "../../src/domain/session-ledger.mjs";
 
 const day = 24 * 60 * 60 * 1000;
@@ -102,7 +106,9 @@ test("syncSessionLedger folds VS Code telemetry into the existing ledger", async
     });
     const vsCode = Object.values(ledger.sessions).find((session) => session.id.startsWith("vscode:"));
 
+    assert.equal(ledger.sessions.current.surface, SURFACE_CLI);
     assert.ok(vsCode);
+    assert.equal(vsCode.surface, SURFACE_VSCODE);
     assert.equal(vsCode.state, STATE_OPEN);
     assert.equal(vsCode.source, SOURCE_USAGE_EVENTS);
     assert.equal(vsCode.totalNanoAiu, 2_400_000_000);
@@ -230,7 +236,7 @@ test("syncSessionLedger skips new VS Code telemetry outside the retention horizo
     assert.equal(Object.values(ledger.sessions).some((session) => session.id.startsWith("vscode:")), false);
 });
 
-test("syncSessionLedger lets shutdown totals replace known live statusline totals", async () => {
+test("syncSessionLedger reparses stale open ledger rows when files changed", async () => {
     const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
     const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
     const now = Date.UTC(2026, 5, 10, 12);
@@ -293,6 +299,14 @@ test("syncSessionLedger first run keeps recent no-shutdown sessions open and aut
             outputTokens: 50,
         }),
     ]);
+    await writeEvents(root, "stale-message-output", [
+        event("session.model_change", now - 11 * day, {
+            newModel: "gpt-test",
+        }),
+        event("assistant.message", now - 11 * day + 1000, {
+            outputTokens: 25,
+        }),
+    ]);
     await writeEvents(root, "recent-with-aiu", [
         event("assistant.usage", now - 2 * day, {
             model: "gpt-test",
@@ -321,6 +335,10 @@ test("syncSessionLedger first run keeps recent no-shutdown sessions open and aut
     assert.equal(ledger.sessions["stale-token-only"].state, STATE_AUTO_CLOSED);
     assert.equal(ledger.sessions["stale-token-only"].source, SOURCE_ESTIMATED_TOKENS);
     assert.equal(ledger.sessions["stale-token-only"].totalNanoAiu, 500_000_000);
+    assert.equal(ledger.sessions["stale-message-output"].state, STATE_AUTO_CLOSED);
+    assert.equal(ledger.sessions["stale-message-output"].source, SOURCE_ESTIMATED_TOKENS);
+    assert.equal(ledger.sessions["stale-message-output"].totalNanoAiu, 250_000_000);
+    assert.deepEqual(ledger.sessions["stale-message-output"].modelMetrics["gpt-test"].tokenTotals, { outputTokens: 25 });
     assert.equal(ledger.sessions["recent-with-aiu"].state, STATE_OPEN);
     assert.equal(ledger.sessions["recent-with-aiu"].source, SOURCE_USAGE_EVENTS);
     assert.equal(ledger.sessions["recent-with-aiu"].totalNanoAiu, 2_000_000_000);
@@ -544,7 +562,7 @@ test("syncSessionLedger lets shutdown totals replace known usage-event totals", 
     assert.deepEqual(ledger.sessions.known.modelMetrics, {
         "gpt-test": {
             totalNanoAiu: 9_000_000_000,
-            tokenTotals: { outputTokens: 30 },
+            tokenTotals: { outputTokens: 20 },
         },
     });
 });
@@ -649,6 +667,118 @@ test("syncSessionLedger rescans open usage-event sessions when more usage arrive
     });
 });
 
+test("syncSessionLedger keeps concurrent unclosed sessions cumulative without double counting", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
+    const now = Date.UTC(2026, 5, 10, 12);
+    await writeEvents(root, "active-a", [
+        event("assistant.usage", now - 10_000, {
+            model: "gpt-test",
+            copilotUsage: { totalNanoAiu: 1_000_000_000 },
+        }),
+    ]);
+    await writeEvents(root, "active-b", [
+        event("assistant.usage", now - 9_000, {
+            model: "gpt-test",
+            copilotUsage: { totalNanoAiu: 2_000_000_000 },
+        }),
+    ]);
+
+    const first = await syncSessionLedger({ currentSessionId: "active-a", sessionStateRoot: root, ledgerPath, now });
+
+    assert.equal(first.sessions["active-a"].state, STATE_OPEN);
+    assert.equal(first.sessions["active-b"].state, STATE_OPEN);
+    assert.equal(first.sessions["active-a"].totalNanoAiu, 1_000_000_000);
+    assert.equal(first.sessions["active-b"].totalNanoAiu, 2_000_000_000);
+    assert.deepEqual(sessionLedgerWindows(first, now), {
+        window24hUsd: 0.03,
+        window7dUsd: 0.03,
+        window30dUsd: 0.03,
+    });
+
+    await writeEvents(root, "active-a", [
+        event("assistant.usage", now - 10_000, {
+            model: "gpt-test",
+            copilotUsage: { totalNanoAiu: 1_000_000_000 },
+        }),
+        event("assistant.usage", now - 1_000, {
+            model: "gpt-test",
+            copilotUsage: { totalNanoAiu: 1_000_000_000 },
+        }),
+    ]);
+
+    const second = await syncSessionLedger({ currentSessionId: "active-a", sessionStateRoot: root, ledgerPath, now });
+
+    assert.equal(second.sessions["active-a"].totalNanoAiu, 2_000_000_000);
+    assert.equal(second.sessions["active-b"].totalNanoAiu, 2_000_000_000);
+    assert.deepEqual(sessionLedgerWindows(second, now), {
+        window24hUsd: 0.04,
+        window7dUsd: 0.04,
+        window30dUsd: 0.04,
+    });
+    assert.equal(Object.keys(second.sessions).filter((id) => id === "active-a").length, 1);
+    assert.equal(Object.keys(second.sessions).filter((id) => id === "active-b").length, 1);
+});
+
+test("syncSessionLedger folds runtime official totals for concurrent open sessions into cached windows", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const dir = await mkdtemp(join(tmpdir(), "copilot-cost-data-"));
+    const ledgerPath = join(dir, "session-ledger.json");
+    const summaryPath = join(dir, "summary-state.json");
+    const now = Date.UTC(2026, 5, 10, 12);
+    await writeEvents(root, "active-a", [
+        event("assistant.message", now - 2_000, {
+            model: "gpt-test",
+            outputTokens: 5,
+        }),
+    ]);
+    await writeEvents(root, "active-b", [
+        event("assistant.message", now - 1_000, {
+            model: "gpt-test",
+            outputTokens: 10,
+        }),
+    ]);
+    await writeFile(summaryPath, JSON.stringify({
+        version: 1,
+        windows: { window24hUsd: 0, window7dUsd: 0, window30dUsd: 0, updatedAt: now - 10 * 60 * 1000 },
+        runtime: {
+            left: {
+                sessionId: "active-a",
+                officialTotalUsd: 4.10,
+                totalUsd: 4.20,
+                lastTurnAt: now - 2_000,
+            },
+            right: {
+                sessionId: "active-b",
+                officialTotalUsd: 0.13,
+                totalUsd: 0.14,
+                lastTurnAt: now - 1_000,
+            },
+        },
+    }));
+
+    const ledger = await syncSessionLedger({
+        currentSessionId: "active-b",
+        sessionStateRoot: root,
+        ledgerPath,
+        summaryPath,
+        now,
+    });
+    const summary = JSON.parse(await readFile(summaryPath, "utf8"));
+
+    assert.equal(ledger.sessions["active-a"].source, SOURCE_RUNTIME);
+    assert.equal(ledger.sessions["active-a"].totalNanoAiu, 410_000_000_000);
+    assert.equal(ledger.sessions["active-a"].windowAt, now - 2_000);
+    assert.equal(ledger.sessions["active-b"].source, SOURCE_RUNTIME);
+    assert.equal(ledger.sessions["active-b"].totalNanoAiu, 13_000_000_000);
+    assert.deepEqual(summary.windows, {
+        window24hUsd: 4.2299999999999995,
+        window7dUsd: 4.2299999999999995,
+        window30dUsd: 4.2299999999999995,
+        updatedAt: now,
+    });
+});
+
 test("syncSessionLedger rescans source-none sessions when file size changes despite near-identical mtimes", async () => {
     const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
     const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
@@ -680,7 +810,7 @@ test("syncSessionLedger rescans source-none sessions when file size changes desp
     assert.equal(ledger.sessions.known.totalNanoAiu, 7_000_000_000);
 });
 
-test("syncSessionLedger lets shutdown totals replace auto-closed token estimates", async () => {
+test("syncSessionLedger reparses auto-closed rows when files changed", async () => {
     const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
     const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
     const now = Date.UTC(2026, 5, 10, 12);
@@ -718,7 +848,40 @@ test("syncSessionLedger lets shutdown totals replace auto-closed token estimates
     assert.equal(ledger.sessions.known.estimateConfidence, undefined);
 });
 
-test("syncSessionLedger lets full shutdown totals replace model-metrics fallback closures", async () => {
+test("syncSessionLedger trusts unchanged auto-closed rows without reparsing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
+    const now = Date.UTC(2026, 5, 10, 12);
+    await writeEvents(root, "known", [
+        event("session.shutdown", now - 1000, { totalNanoAiu: 5_000_000_000 }),
+    ]);
+    const details = await fileDetails(join(root, "known", "events.jsonl"));
+    await writeFile(ledgerPath, JSON.stringify({
+        version: 1,
+        sessions: {
+            known: {
+                id: "known",
+                state: STATE_AUTO_CLOSED,
+                totalNanoAiu: 500_000_000,
+                source: SOURCE_ESTIMATED_TOKENS,
+                lastSeenAt: now - 8 * day,
+                lastUpdatedAt: now - day,
+                eventFileMtimeMs: details.mtimeMs,
+                eventFileSize: details.size,
+                estimateConfidence: "low",
+            },
+        },
+    }));
+
+    const ledger = await syncSessionLedger({ sessionStateRoot: root, ledgerPath, now });
+
+    assert.equal(ledger.sessions.known.state, STATE_AUTO_CLOSED);
+    assert.equal(ledger.sessions.known.source, SOURCE_ESTIMATED_TOKENS);
+    assert.equal(ledger.sessions.known.totalNanoAiu, 500_000_000);
+    assert.equal(ledger.sessions.known.estimateConfidence, "low");
+});
+
+test("syncSessionLedger reparses model-metrics fallback closures when files changed", async () => {
     const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
     const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
     const now = Date.UTC(2026, 5, 10, 12);
@@ -761,23 +924,10 @@ test("syncSessionLedger lets full shutdown totals replace model-metrics fallback
     assert.equal(ledger.sessions.known.closedAt, now - day);
 });
 
-test("syncSessionLedger backfills model metrics for shutdown rows that only have total cost", async () => {
+test("syncSessionLedger trusts unchanged shutdown rows without reparsing to backfill model metrics", async () => {
     const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
     const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
     const now = Date.UTC(2026, 5, 10, 12);
-    await writeFile(ledgerPath, JSON.stringify({
-        version: 1,
-        sessions: {
-            known: {
-                id: "known",
-                state: STATE_CLOSED,
-                totalNanoAiu: 8_000_000_000,
-                source: SOURCE_SHUTDOWN,
-                closedAt: now - day,
-                lastSeenAt: now - day,
-            },
-        },
-    }));
     await writeEvents(root, "known", [
         event("session.shutdown", now - day, {
             totalNanoAiu: 8_000_000_000,
@@ -793,22 +943,29 @@ test("syncSessionLedger backfills model metrics for shutdown rows that only have
             },
         }),
     ]);
+    const details = await fileDetails(join(root, "known", "events.jsonl"));
+    await writeFile(ledgerPath, JSON.stringify({
+        version: 1,
+        sessions: {
+            known: {
+                id: "known",
+                state: STATE_CLOSED,
+                totalNanoAiu: 8_000_000_000,
+                source: SOURCE_SHUTDOWN,
+                closedAt: now - day,
+                lastSeenAt: now - day,
+                eventFileMtimeMs: details.mtimeMs,
+                eventFileSize: details.size,
+            },
+        },
+    }));
 
     const ledger = await syncSessionLedger({ sessionStateRoot: root, ledgerPath, now });
 
     assert.equal(ledger.sessions.known.state, STATE_CLOSED);
     assert.equal(ledger.sessions.known.source, SOURCE_SHUTDOWN);
     assert.equal(ledger.sessions.known.totalNanoAiu, 8_000_000_000);
-    assert.deepEqual(ledger.sessions.known.modelMetrics, {
-        "gpt-test": {
-            totalNanoAiu: 8_000_000_000,
-            tokenTotals: {
-                inputTokens: 100,
-                cacheReadTokens: 20,
-                outputTokens: 10,
-            },
-        },
-    });
+    assert.deepEqual(ledger.sessions.known.modelMetrics, {});
 });
 
 test("syncSessionLedger scans new sessions within the 180-day retention horizon", async () => {
@@ -829,6 +986,114 @@ test("syncSessionLedger scans new sessions within the 180-day retention horizon"
     assert.equal(ledger.sessions["within-history"].state, STATE_CLOSED);
     assert.equal(ledger.sessions["within-history"].totalNanoAiu, 1_000_000_000);
     assert.equal(ledger.sessions["outside-history"], undefined);
+});
+
+test("syncSessionLedger prunes existing sessions outside the retention horizon", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
+    const now = Date.UTC(2026, 11, 1, 12);
+    await writeFile(ledgerPath, JSON.stringify({
+        version: 1,
+        sessions: {
+            retained: {
+                id: "retained",
+                state: STATE_CLOSED,
+                source: SOURCE_SHUTDOWN,
+                totalNanoAiu: 1_000_000_000,
+                closedAt: now - 180 * day,
+            },
+            old: {
+                id: "old",
+                state: STATE_CLOSED,
+                source: SOURCE_SHUTDOWN,
+                totalNanoAiu: 2_000_000_000,
+                closedAt: now - 181 * day,
+            },
+        },
+    }));
+
+    const ledger = await syncSessionLedger({ sessionStateRoot: root, ledgerPath, now });
+
+    assert.equal(ledger.sessions.retained.totalNanoAiu, 1_000_000_000);
+    assert.equal(ledger.sessions.old, undefined);
+});
+
+test("syncSessionLedger does not rescan changed CLI files when latest event is outside the retention horizon", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
+    const now = Date.UTC(2026, 11, 1, 12);
+    await writeFile(ledgerPath, JSON.stringify({
+        version: 1,
+        sessions: {
+            old: {
+                id: "old",
+                state: STATE_CLOSED,
+                source: SOURCE_SHUTDOWN,
+                totalNanoAiu: 1_000_000_000,
+                closedAt: now - 181 * day,
+                eventFileMtimeMs: now - 181 * day,
+                eventFileSize: 1,
+            },
+        },
+    }));
+    await writeEvents(root, "old", [
+        event("session.shutdown", now - 181 * day, { totalNanoAiu: 9_000_000_000 }),
+    ]);
+    await touch(join(root, "old", "events.jsonl"), now);
+
+    const ledger = await syncSessionLedger({ sessionStateRoot: root, ledgerPath, now });
+
+    assert.equal(ledger.sessions.old, undefined);
+});
+
+test("syncSessionLedger does not rescan changed VS Code telemetry outside the retention horizon", async () => {
+    const root = await mkdtemp(join(tmpdir(), "copilot-cost-session-state-"));
+    const vsCodeRoot = await mkdtemp(join(tmpdir(), "copilot-cost-vscode-user-"));
+    const ledgerPath = join(await mkdtemp(join(tmpdir(), "copilot-cost-data-")), "session-ledger.json");
+    const now = Date.UTC(2026, 11, 1, 12);
+    const chatDir = join(vsCodeRoot, "workspaceStorage", "workspace-a", "chatSessions");
+    const chatPath = join(chatDir, "old-session.jsonl");
+    await mkdir(chatDir, { recursive: true });
+    await writeFile(chatPath, [
+        JSON.stringify({ kind: 0, v: { sessionId: "old-session", requests: [] } }),
+        JSON.stringify({
+            kind: 2,
+            k: ["requests"],
+            v: [{
+                requestId: "old-request",
+                timestamp: now - 181 * day,
+                result: {
+                    details: "GPT-5.3-Codex - 9 credits",
+                    metadata: { sessionId: "old-session", resolvedModel: "gpt-5.3-codex" },
+                },
+            }],
+        }),
+    ].join("\n"));
+    await touch(chatPath, now - 181 * day);
+    await writeFile(ledgerPath, JSON.stringify({
+        version: 1,
+        sessions: {
+            "vscode:prior:workspace-a:old-session": {
+                id: "vscode:prior:workspace-a:old-session",
+                state: STATE_CLOSED,
+                surface: SURFACE_VSCODE,
+                source: SOURCE_SHUTDOWN,
+                totalNanoAiu: 1_000_000_000,
+                closedAt: now - 181 * day,
+                eventFileMtimeMs: now - 181 * day,
+                eventFileSize: 1,
+            },
+        },
+    }));
+
+    const ledger = await syncSessionLedger({
+        sessionStateRoot: root,
+        ledgerPath,
+        vsCodeUserRoots: [vsCodeRoot],
+        now,
+    });
+
+    assert.deepEqual(Object.values(ledger.sessions).filter((session) => session.surface === SURFACE_VSCODE), []);
 });
 
 test("syncSessionLedger values pre-usage-based sessions from retained token profiles", async () => {
@@ -863,9 +1128,9 @@ test("syncSessionLedger values pre-usage-based sessions from retained token prof
     const ledger = await syncSessionLedger({ sessionStateRoot: root, ledgerPath, now });
 
     assert.equal(ledger.sessions.priced.state, STATE_CLOSED);
-    assert.equal(ledger.sessions["pre-pricing"].state, STATE_AUTO_CLOSED);
-    assert.equal(ledger.sessions["pre-pricing"].source, SOURCE_ESTIMATED_TOKENS);
-    assert.equal(ledger.sessions["pre-pricing"].totalNanoAiu, 500_000_000);
+    assert.equal(ledger.sessions["pre-pricing"].state, STATE_CLOSED);
+    assert.equal(ledger.sessions["pre-pricing"].source, SOURCE_SHUTDOWN);
+    assert.equal(ledger.sessions["pre-pricing"].totalNanoAiu, 50_000_000_000);
 });
 
 test("discoverSessionEventFiles ignores missing roots and sorts newest first", async () => {
@@ -901,4 +1166,9 @@ async function touch(path, at) {
     const date = new Date(at);
     await utimes(path, date, date);
     await readFile(path);
+}
+
+async function fileDetails(path) {
+    const details = await stat(path);
+    return { mtimeMs: details.mtimeMs, size: details.size };
 }

@@ -1,6 +1,6 @@
 {
   "name": "copilot-cost",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Copilot CLI extension that displays message cost, conversation cost, cumulative session total, and rolling totals after messages and in the statusline.",
   "type": "module",

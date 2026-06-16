@@ -31,14 +31,14 @@ Total £1.24 · Ctx 48% (96k/200k) · Sess £1.4 · 24h £0 · 7d £2 · 30d £8
 
 | Example | Name | Description |
 | --- | --- | --- |
-| `Total £1.24` | Conversation cost | Best-known current conversation total: local assistant/compaction usage stays pending until Copilot's official statusline counter catches up. |
+| `Total £1.24` | Conversation cost | Best-known current conversation total: local assistant/compaction usage stays pending until the extension captures Copilot's official session counter. |
 | `Ctx 48% (96k/200k)` | Context usage | Current context-window usage, shown as a percentage and as used/available tokens. |
 | `Sess £1.4` | Copilot session total | Copilot's cumulative official running cost for the current Copilot CLI session. |
-| `24h £0` | 24h local CLI cost | Session-ledger cost in the last 24 hours. |
-| `7d £2` | 7d local CLI cost | Session-ledger cost in the last 7 days. |
-| `30d £8` | 30d local CLI cost | Session-ledger cost in the last 30 days. |
+| `24h £0` | 24h local session cost | Session-ledger cost in the last 24 hours. |
+| `7d £2` | 7d local session cost | Session-ledger cost in the last 7 days. |
+| `30d £8` | 30d local session cost | Session-ledger cost in the last 30 days. |
 
-`Sess` is the cumulative live official Copilot CLI session counter, shown in the same cumulative totals group as the 24h/7d/30d values. The same counter reconciles locally pending `Total` and keeps the current session ledger up to date because local events can miss tool and sub-agent work, but Copilot CLI sessions are still terminal instances rather than conversation or account boundaries. Rolling 24h/7d/30d totals come from local Copilot CLI session telemetry, so they are not account-wide Copilot billing totals. Usage-based billing started on 2026-06-01, so earlier pay-per-message totals are ignored and retained token telemetry is valued as a historical equivalent under the current usage-based model when a local post-June rate profile or built-in GitHub pricing fallback is available. The live footer can also include Copilot CLI status data such as model, effort level, and current context percentage.
+`Sess` is the cumulative live official Copilot CLI session counter, shown in the same cumulative totals group as the 24h/7d/30d values. The native extension captures that counter and reconciles locally pending `Total` in the lightweight summary state because local events can miss tool and sub-agent work; the footer/statusline command only reads that summary state and renders it. Copilot CLI sessions are still terminal instances rather than conversation or account boundaries. Rolling 24h/7d/30d totals come from retained local session telemetry cached after ledger sync, not from live RPC refreshes or account-wide Copilot billing totals. Full sync also folds current summary runtime totals for still-open sessions into the ledger because active JSONL logs can lack live cost until shutdown. Startup and `/cost` force a sync; completed turns refresh the shared rolling-window cache only when its summary timestamp is more than five minutes old, so concurrent sessions normally catch up within a few minutes without syncing after every turn. Usage-based billing started on 2026-06-01, so earlier pay-per-message totals are ignored and retained token telemetry is valued as a historical equivalent under the current usage-based model when a local post-June rate profile or built-in GitHub pricing fallback is available. Older stale sessions without a shutdown record can be estimated from retained assistant-message output tokens when no richer usage record exists; those appear as low-confidence `Stale [Token]` diagnostics.
 
 ## Documentation
 
@@ -104,7 +104,7 @@ copilot plugin marketplace remove copilot-extensions
 
 ## Quick configure
 
-Use `/cost` for an interactive overview of recent local cost history. The top-level view shows current totals, 24h/7d/30d/60d/90d/180d cumulative totals, cost by calendar month for the current and previous four months, a six-month month-block calendar with blank pre-data days and dash-filled no-spend days after local data begins, usage-based billing cost since June 1, 2026, historical equivalent estimates for earlier retained telemetry, and run-rate analysis based on the available local data coverage. Choose **Info** for metric/source details or **Settings** to configure what the extension shows, where it appears, which unit to use, how summaries are formatted, export debug data, clear plugin data, or restore prior footer settings.
+Use `/cost` for an interactive overview of recent local cost history. The top-level view shows current totals, 24h/7d/30d/60d/90d/180d cumulative totals, recent calendar-month cost, a six-month month-block calendar with blank pre-data days and dash-filled no-spend days after local data begins, usage-based billing cost since June 1, 2026, historical equivalent estimates for earlier retained telemetry, retained session cost split by Copilot CLI vs VS Code, and run-rate analysis based on the available local data coverage. Choose **Info** for metric/source details or **Settings** to configure what the extension shows, where it appears, which unit to use, how summaries are formatted, export debug data, clear plugin data, or restore prior footer settings.
 
 ![copilot-cost overview dashboard](../../docs/assets/copilot-cost/copilot-cost-dashboard.png)
 
@@ -122,20 +122,24 @@ Direct commands:
 
 On first run, `copilot-cost` configures Copilot CLI's built-in Custom Footer through `statusLine.command` and enables `footer.showCustom`. If another statusline command already exists, it is replaced with `copilot-cost` and saved so `/cost` > **Settings** > **Uninstall** can restore it.
 
-The Settings view also includes maintenance actions. **Export Session Data** writes `COPILOT_COST_DEBUG.jsonl` to the current working directory with one redacted JSONL record per discovered local Copilot CLI session: event-file metadata, event/type counts, token/cost/model summaries, and any matching ledger record. It excludes prompts, responses, transcript text, tool arguments, source code, and absolute local paths; event-file paths are normalized to session-state labels. **Clear Plugin Data** removes the `copilot-cost` plugin-data folder, including settings, session ledger history, runtime totals, export state, and managed statusline state. It does not remove the plugin package or Copilot settings.
+The Settings view also includes maintenance actions. **Export Session Data** writes `COPILOT_COST_DEBUG.jsonl` to the current working directory with one redacted JSONL record per discovered local session or ledger row: event-file metadata when available, event/type counts, token/cost/model summaries, and any matching ledger record. It excludes prompts, responses, transcript text, tool arguments, source code, and absolute local paths; event-file paths are normalized to session-state labels. **Clear Plugin Data** removes the `copilot-cost` plugin-data folder, including settings, session ledger history, summary state, export state, and managed statusline state. It does not remove the plugin package or Copilot settings.
 
 ## Persisted data
 
-`copilot-cost` persists small JSON files so runtime accounting state survives extension reloads and Copilot CLI restarts. It stores cost/accounting state only; it does not persist prompts, responses, transcript text, file paths from your work, or source code.
+`copilot-cost` persists small minified JSON files so runtime accounting state survives extension reloads and Copilot CLI restarts. It stores cost/accounting state only; it does not persist prompts, responses, transcript text, file paths from your work, or source code.
 
 | File | Scope | Why it exists |
 | --- | --- | --- |
 | `~/.copilot/plugin-data/copilot-extensions/copilot-cost/settings.json` | Global user | Saves display mode, unit, and custom format strings. |
-| `~/.copilot/plugin-data/copilot-extensions/copilot-cost/session-ledger.json` | Global user | Single cost/state file. Stores compact per-session records for rolling 24h/7d/30d totals, the 180-day overview, and lean runtime display/reconciliation state. |
+| `~/.copilot/plugin-data/copilot-extensions/copilot-cost/session-ledger.v<plugin-version>.json` | Global user | Historical per-session cost records for startup sync, `/cost`, rolling-window recomputation, and the 180-day overview. |
+| `~/.copilot/plugin-data/copilot-extensions/copilot-cost/summary-state.v<plugin-version>.json` | Global user | Lightweight hot-path display state, cached rolling windows, and the rolling-window sync timestamp. |
 | `~/.copilot/plugin-data/copilot-extensions/copilot-cost/install-state.json` | Plugin installer | Stores the prior statusline/footer settings so the `/cost` uninstall flow can restore them. |
 | `./COPILOT_COST_DEBUG.jsonl` | Current working directory, on demand | Redacted diagnostic export for debugging session discovery and cost extraction. Created only by **Export Session Data**. |
+| `~/.copilot/plugin-data/copilot-extensions/copilot-cost/debug-events.jsonl` | Global user, opt-in | Sanitized extension event probe written only when `COPILOT_COST_DEBUG_EVENTS=1` is set. |
 
-When Copilot provides `COPILOT_PLUGIN_DATA`, setup and runtime state use that directory instead of the fallback path above. When Copilot passes the shared `~/.copilot/session-state` root to the statusline command, `copilot-cost` combines it with the active `session_id` before deriving the plugin-data session key. That keeps parallel terminal sessions isolated, but it should not be interpreted as a user conversation boundary.
+When Copilot provides `COPILOT_PLUGIN_DATA`, setup and runtime state use that directory instead of the fallback path above. When Copilot passes the shared `~/.copilot/session-state` root to the statusline command, `copilot-cost` combines it with the active `session_id` before deriving the summary-state runtime key. That keeps parallel terminal sessions isolated, but it should not be interpreted as a user conversation boundary.
+
+On plugin version change, `copilot-cost` switches to versioned rebuildable cache files and clears stale ledger/summary cache files from previous plugin versions, including the old unversioned names. This prevents older still-running extension processes from writing into the current version's cache schema. Settings and uninstall metadata are retained. Full syncs prune summary records for sessions that are closed in the ledger.
 
 Example settings file:
 
@@ -158,6 +162,7 @@ Example session ledger file:
     "00000000-0000-4000-8000-000000000000": {
       "id": "00000000-0000-4000-8000-000000000000",
       "state": "closed",
+      "surface": "cli",
       "totalNanoAiu": 274586275000,
       "source": "shutdown",
       "firstSeenAt": 1781000000000,
@@ -165,9 +170,24 @@ Example session ledger file:
       "lastUpdatedAt": 1781007900000,
       "closedAt": 1781007900000
     }
+  }
+}
+```
+
+Example summary state file:
+
+```json
+{
+  "version": 1,
+  "windows": {
+    "window24hUsd": 0.42,
+    "window7dUsd": 2.31,
+    "window30dUsd": 8.11,
+    "updatedAt": 1781008000000
   },
   "runtime": {
     "workspace-38595a0d0908": {
+      "sessionId": "00000000-0000-4000-8000-000000000000",
       "totalUsd": 1.52,
       "sessionUsd": 1.40,
       "officialSegmentUsd": 1.40,

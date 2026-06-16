@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import {
     createSessionRuntime,
     finalizeCompaction,
-    finalizeShutdown,
     finalizeTurn,
     runExtension,
+    syncCurrentSessionLedgerIfWindowsStale,
 } from "../../src/runtime/extension.mjs";
 
 test("runExtension registers /cost and attaches session handlers", async () => {
@@ -33,7 +33,6 @@ test("runExtension registers /cost and attaches session handlers", async () => {
         "assistant.usage",
         "session.compaction_complete",
         "session.idle",
-        "session.shutdown",
         "session.usage_info",
         "user.message",
     ]);
@@ -56,22 +55,57 @@ test("createSessionRuntime wires the /cost command to the attached session", asy
     assert.deepEqual(calls[0].context, { args: "off" });
 });
 
-test("createSessionRuntime starts ledger sync when the session id is known", () => {
+test("createSessionRuntime starts ledger sync after startup tasks when the session id is known", async () => {
     const session = new FakeSession("/tmp/session-state/session-a");
     const calls = [];
     const runtime = createSessionRuntime({
+        runStartupTasks: async () => calls.push({ startup: true }),
         syncSessionLedger: async (context) => calls.push(context),
     });
 
     runtime.attach(session);
+    await flushAsyncHandlers();
 
-    assert.deepEqual(calls, [{ currentSessionId: "session-a" }]);
+    assert.deepEqual(calls, [{ startup: true }, { currentSessionId: "session-a" }]);
+});
+
+test("session runtime waits for startup reset before writing summary state", async () => {
+    const session = new FakeSession("/tmp/session-state/session-a");
+    const startup = deferred();
+    const merged = [];
+    const runtime = createSessionRuntime({
+        runStartupTasks: async () => startup.promise,
+        mergeState: async (workspace, patch) => {
+            merged.push({ workspace, patch });
+            return patch;
+        },
+        syncSessionLedger: async () => {},
+    });
+
+    runtime.attach(session);
+    session.emit("session.usage_info", { data: { currentTokens: 1200, tokenLimit: 200000 } });
+    await flushAsyncHandlers();
+
+    assert.deepEqual(merged, []);
+
+    startup.resolve();
+    await flushAsyncHandlers();
+
+    assert.deepEqual(merged, [{
+        workspace: "/tmp/session-state/session-a",
+        patch: {
+            sessionId: "session-a",
+            contextTokens: 1200,
+            contextTokenLimit: 200000,
+        },
+    }]);
 });
 
 test("session runtime persists one user turn and logs message output", async () => {
     const session = new FakeSession("/workspace");
     const merged = [];
     const runtime = createSessionRuntime({
+        runStartupTasks: noopFirstRun,
         readState: async (workspace) => {
             assert.equal(workspace, "/workspace");
             return { officialTotalUsd: 1, pendingUsd: 0, totalUsd: 1 };
@@ -100,17 +134,21 @@ test("session runtime persists one user turn and logs message output", async () 
     session.emit("session.idle", { timestamp: "2026-01-01T00:00:02.000Z" });
     await flushAsyncHandlers();
 
-    assert.equal(merged.length, 1);
-    assert.equal(merged[0].workspace, "/workspace");
-    assert.equal(merged[0].patch.lastUsd, 0.02);
-    assert.equal(merged[0].patch.contextTokens, 1200);
-    assert.equal(merged[0].patch.contextTokenLimit, 200000);
-    assert.equal(merged[0].patch.window24hUsd, undefined);
+    assert.equal(merged.length, 2);
+    assert.deepEqual(merged[0], {
+        workspace: "/workspace",
+        patch: { contextTokens: 1200, contextTokenLimit: 200000 },
+    });
+    assert.equal(merged[1].workspace, "/workspace");
+    assert.equal(merged[1].patch.lastUsd, 0.02);
+    assert.equal(merged[1].patch.contextTokens, 1200);
+    assert.equal(merged[1].patch.contextTokenLimit, 200000);
+    assert.equal(merged[1].patch.window24hUsd, undefined);
     assert.deepEqual(session.logs, ["summary 1.02"]);
 
     session.emit("session.idle", { timestamp: "2026-01-01T00:00:03.000Z" });
     await flushAsyncHandlers();
-    assert.equal(merged.length, 1);
+    assert.equal(merged.length, 2);
 });
 
 test("session runtime waits for session idle before logging message output", async () => {
@@ -118,6 +156,7 @@ test("session runtime waits for session idle before logging message output", asy
     const merged = [];
     const firstRuns = [];
     const runtime = createSessionRuntime({
+        runStartupTasks: noopFirstRun,
         readState: async () => undefined,
         mergeState: async (workspace, patch) => {
             merged.push({ workspace, patch });
@@ -162,6 +201,7 @@ test("session runtime keeps one accumulator when the user steers before idle", a
     const session = new FakeSession("/workspace");
     const merged = [];
     const runtime = createSessionRuntime({
+        runStartupTasks: noopFirstRun,
         readState: async () => undefined,
         mergeState: async (workspace, patch) => {
             merged.push({ workspace, patch });
@@ -193,6 +233,7 @@ test("session runtime adds observed usage to prior conversation total", async ()
     const session = new FakeSession("/workspace");
     const merged = [];
     const runtime = createSessionRuntime({
+        runStartupTasks: noopFirstRun,
         readState: async () => ({ officialTotalUsd: 0.9, pendingUsd: 0, totalUsd: 0.9 }),
         mergeState: async (workspace, patch) => {
             merged.push({ workspace, patch });
@@ -224,6 +265,7 @@ test("session runtime includes sub-agent usage in the parent turn", async () => 
     const session = new FakeSession("/workspace");
     const merged = [];
     const runtime = createSessionRuntime({
+        runStartupTasks: noopFirstRun,
         readState: async () => undefined,
         mergeState: async (workspace, patch) => {
             merged.push({ workspace, patch });
@@ -286,7 +328,7 @@ test("finalizeTurn skips empty or already completed turns", async () => {
     assert.equal(await finalizeTurn(session, { events: 1, done: true }, {}, {}, deps), undefined);
 });
 
-test("finalizeTurn starts a ledger sync after completed turn output", async () => {
+test("finalizeTurn checks the stale window sync gate before rendering the summary", async () => {
     const session = new FakeSession("/tmp/session-state/session-a");
     const calls = [];
     await finalizeTurn(session, {
@@ -307,6 +349,11 @@ test("finalizeTurn starts a ledger sync after completed turn output", async () =
         runFirstRunTasks: async () => {
             calls.push("first-run");
         },
+        claimUsageWindowSync: async ({ now, staleAfterMs }) => {
+            calls.push(["claim", now, staleAfterMs]);
+            return true;
+        },
+        now: () => 123,
         syncSessionLedger: async (context) => {
             calls.push(["sync", context]);
         },
@@ -314,10 +361,148 @@ test("finalizeTurn starts a ledger sync after completed turn output", async () =
 
     assert.deepEqual(session.logs, ["summary"]);
     assert.deepEqual(calls, [
+        ["claim", 123, 5 * 60 * 1000],
+        ["sync", { currentSessionId: "session-a", now: 123 }],
         "message",
         "first-run",
-        ["sync", { currentSessionId: "session-a" }],
     ]);
+});
+
+test("finalizeTurn still renders when a claimed stale window sync fails", async () => {
+    const session = new FakeSession("/tmp/session-state/session-a");
+    const calls = [];
+
+    await finalizeTurn(session, {
+        events: 1,
+        startedAt: Date.UTC(2026, 0, 1),
+        nanoAiu: 1_000_000_000,
+    }, {}, {
+        timestamp: "2026-01-01T00:00:02.000Z",
+    }, {
+        readState: async () => undefined,
+        mergeState: async () => ({ totalUsd: 0.01 }),
+        readSettings: async () => ({ mode: "message", unit: "usd", messageFormat: "{cost}" }),
+        refreshUsageWindows: async () => ({ window24hUsd: 1 }),
+        renderSummary: (state) => {
+            calls.push(["message", state.window24hUsd]);
+            return "summary after failed sync";
+        },
+        runFirstRunTasks: async () => {
+            calls.push("first-run");
+        },
+        claimUsageWindowSync: async () => true,
+        syncSessionLedger: async () => {
+            calls.push("sync-failed");
+            throw new Error("sync failed");
+        },
+    });
+
+    assert.deepEqual(session.logs, ["summary after failed sync"]);
+    assert.deepEqual(calls, [
+        "sync-failed",
+        ["message", 1],
+        "first-run",
+    ]);
+});
+
+test("finalizeTurn reconciles official usage from session RPC when available", async () => {
+    const session = new FakeSession("/tmp/session-state/session-a");
+    session.rpc = {
+        usage: {
+            getMetrics: async () => ({ totalNanoAiu: 2_000_000_000 }),
+        },
+    };
+    let state;
+
+    const result = await finalizeTurn(session, {
+        events: 1,
+        startedAt: Date.UTC(2026, 0, 1),
+        nanoAiu: 1_000_000_000,
+    }, {}, {
+        timestamp: "2026-01-01T00:00:02.000Z",
+    }, {
+        readState: async () => state,
+        mergeState: async (workspace, patch) => {
+            state = { ...state, ...patch };
+            return state;
+        },
+        readSettings: async () => ({ mode: "off", unit: "usd", messageFormat: "{cost}" }),
+        runFirstRunTasks: noopFirstRun,
+        claimUsageWindowSync: async () => false,
+    });
+
+    assert.equal(result.totalUsd, 0.02);
+    assert.equal(result.pendingUsd, 0);
+    assert.equal(result.officialTotalUsd, 0.02);
+    assert.equal(result.sessionId, "session-a");
+    assert.equal(result.window24hUsd, undefined);
+});
+
+test("syncCurrentSessionLedgerIfWindowsStale skips fresh windows and syncs claimed stale windows", async () => {
+    const session = new FakeSession("/tmp/session-state/session-a");
+    const calls = [];
+
+    assert.equal(await syncCurrentSessionLedgerIfWindowsStale(session, {
+        currentSessionId: () => "session-a",
+        now: () => 100,
+        windowSyncIntervalMs: 300_000,
+        claimUsageWindowSync: async (context) => {
+            calls.push(["fresh-claim", context]);
+            return false;
+        },
+        syncSessionLedger: async () => {
+            throw new Error("syncSessionLedger should not be called");
+        },
+    }), false);
+
+    assert.equal(await syncCurrentSessionLedgerIfWindowsStale(session, {
+        currentSessionId: () => "session-a",
+        now: () => 200,
+        windowSyncIntervalMs: 300_000,
+        claimUsageWindowSync: async (context) => {
+            calls.push(["stale-claim", context]);
+            return true;
+        },
+        syncSessionLedger: async (context) => {
+            calls.push(["sync", context]);
+        },
+    }), true);
+
+    assert.deepEqual(calls, [
+        ["fresh-claim", { now: 100, staleAfterMs: 300_000 }],
+        ["stale-claim", { now: 200, staleAfterMs: 300_000 }],
+        ["sync", { currentSessionId: "session-a", now: 200 }],
+    ]);
+});
+
+test("syncCurrentSessionLedgerIfWindowsStale reports failed claimed syncs without throwing", async () => {
+    const session = new FakeSession("/tmp/session-state/session-a");
+
+    assert.equal(await syncCurrentSessionLedgerIfWindowsStale(session, {
+        currentSessionId: () => "session-a",
+        now: () => 300,
+        windowSyncIntervalMs: 300_000,
+        claimUsageWindowSync: async () => true,
+        syncSessionLedger: async () => {
+            throw new Error("sync failed");
+        },
+    }), false);
+});
+
+test("syncCurrentSessionLedgerIfWindowsStale reports failed stale-window claims without throwing", async () => {
+    const session = new FakeSession("/tmp/session-state/session-a");
+
+    assert.equal(await syncCurrentSessionLedgerIfWindowsStale(session, {
+        currentSessionId: () => "session-a",
+        now: () => 400,
+        windowSyncIntervalMs: 300_000,
+        claimUsageWindowSync: async () => {
+            throw new Error("claim failed");
+        },
+        syncSessionLedger: async () => {
+            throw new Error("syncSessionLedger should not be called");
+        },
+    }), false);
 });
 
 test("finalizeCompaction persists successful compaction usage only", async () => {
@@ -352,67 +537,6 @@ test("finalizeCompaction persists successful compaction usage only", async () =>
         workspacePath: "/workspace",
         priorState: { officialTotalUsd: 1, pendingUsd: 0, totalUsd: 1 },
     }]);
-});
-
-test("finalizeShutdown marks the session ledger closed when shutdown data arrives", async () => {
-    let written;
-    const record = await finalizeShutdown(new FakeSession("/tmp/session-state/abc"), {
-        timestamp: "2026-01-01T00:00:00.000Z",
-        data: {
-            modelMetrics: {
-                "gpt-test": { totalNanoAiu: 2_000_000_000 },
-            },
-        },
-    }, {
-        updateSessionLedger: async (updater) => {
-            const ledger = await updater({});
-            written = ledger;
-            return ledger;
-        },
-    });
-
-    assert.equal(record.state, "closed");
-    assert.equal(record.totalNanoAiu, 2_000_000_000);
-    assert.equal(record.source, "modelMetrics");
-    assert.equal(written.sessions.abc.totalNanoAiu, 2_000_000_000);
-});
-
-test("finalizeShutdown persists shutdown model metrics for dashboard breakdowns", async () => {
-    const record = await finalizeShutdown(new FakeSession("/tmp/session-state/abc"), {
-        timestamp: "2026-01-01T00:00:00.000Z",
-        data: {
-            totalNanoAiu: 3_000_000_000,
-            modelMetrics: {
-                "gpt-test": {
-                    totalNanoAiu: 3_000_000_000,
-                    usage: {
-                        inputTokens: 100,
-                        cacheReadTokens: 20,
-                        outputTokens: 10,
-                    },
-                    requests: { count: 2, cost: 3 },
-                },
-            },
-        },
-    }, {
-        updateSessionLedger: async (updater) => updater({}),
-    });
-
-    assert.equal(record.state, "closed");
-    assert.equal(record.source, "shutdown");
-    assert.equal(record.totalNanoAiu, 3_000_000_000);
-    assert.deepEqual(record.modelMetrics, {
-        "gpt-test": {
-            totalNanoAiu: 3_000_000_000,
-            tokenTotals: {
-                inputTokens: 100,
-                cacheReadTokens: 20,
-                outputTokens: 10,
-                requestCount: 2,
-                requestCostUnits: 3,
-            },
-        },
-    });
 });
 
 class FakeSession {
@@ -456,6 +580,16 @@ function usageEvent({ totalNanoAiu }) {
 
 function flushAsyncHandlers() {
     return new Promise((resolve) => setImmediate(resolve));
+}
+
+function deferred() {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve, reject };
 }
 
 async function noopFirstRun() {}

@@ -1,4 +1,4 @@
-// Exports local Copilot CLI session telemetry as JSONL fixture data.
+// Exports local session telemetry and ledger rows as JSONL fixture data.
 // The export keeps cost/token/session metadata and deliberately avoids prompts,
 // assistant text, transcript text, tool arguments, and source code.
 
